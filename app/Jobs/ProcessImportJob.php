@@ -2,10 +2,13 @@
 
 namespace App\Jobs;
 
+use App\Enums\ImportStatus;
 use App\Models\Import;
+use App\Services\ImportService;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Throwable;
 
 /**
  * Processes the offers stored in an import's payload.
@@ -43,8 +46,30 @@ class ProcessImportJob implements ShouldBeUnique, ShouldQueue
     /**
      * Execute the job.
      */
-    public function handle(): void
+    public function handle(ImportService $importService): void
     {
-        //
+        $importService->process($this->import);
+    }
+
+    /**
+     * Runs once the attempts are exhausted, or on a timeout or a fatal error, so an import
+     * never hangs in `processing`. Between attempts the status stays `processing`.
+     */
+    public function failed(?Throwable $exception): void
+    {
+        $this->import->update([
+            'status' => ImportStatus::Failed,
+            'error' => $this->describe($exception),
+            'completed_at' => now(),
+        ]);
+    }
+
+    private function describe(?Throwable $exception): string
+    {
+        if ($exception === null) {
+            return 'Unknown error';
+        }
+
+        return $exception->getMessage() !== '' ? $exception->getMessage() : $exception::class;
     }
 }
