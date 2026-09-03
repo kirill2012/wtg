@@ -48,7 +48,7 @@ which MySQL creates on its first boot.
 
 ## Without Docker
 
-Requires PHP 8.2+ with `pdo_mysql` and `redis`, Composer, MySQL 8 and Redis. Create the
+Requires PHP 8.5+ with `pdo_mysql` and `redis`, Composer, MySQL 8 and Redis. Create the
 `wtg` and `wtg_test` databases and point `.env` at them, then:
 
 ```bash
