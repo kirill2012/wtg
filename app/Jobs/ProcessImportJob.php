@@ -52,8 +52,8 @@ class ProcessImportJob implements ShouldBeUnique, ShouldQueue
     }
 
     /**
-     * Runs once the attempts are exhausted, or on a timeout or a fatal error, so an import
-     * never hangs in `processing`. Between attempts the status stays `processing`.
+     * Runs once the attempts are exhausted — a timed-out or crashed attempt counts as one —
+     * so an import never hangs in `processing`. Between attempts the status stays `processing`.
      */
     public function failed(?Throwable $exception): void
     {

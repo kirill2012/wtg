@@ -57,7 +57,7 @@ services:
     <<: *app
     # Unprivileged so job logs stay owned by the host user in the bind mount.
     user: www-data
-    command: php artisan queue:work --tries=3 --sleep=1 --max-time=3600
+    command: php artisan queue:work --tries=3 --timeout=60 --sleep=1 --max-time=3600
     environment:
       <<: *app-env
       RUN_MIGRATIONS: "false"
