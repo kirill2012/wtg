@@ -59,3 +59,15 @@ php artisan serve
 php artisan queue:work    # in a second terminal
 php artisan test
 ```
+
+## Known limitations
+
+- **A failed queue push leaves the import `pending`.** The import row is committed before
+  the job is pushed. If the push fails (Redis unreachable), the client gets a 500 and the row
+  stays `pending` with nothing queued; a repeated `POST` returns that row without re-queuing,
+  because `supplier + external_import_id` already exists. Recovery is a manual re-dispatch,
+  which the job's `ShouldBeUnique` makes safe to do more than once:
+  `php artisan tinker --execute 'App\Jobs\ProcessImportJob::dispatch(App\Models\Import::findOrFail(15));'`.
+  Closing the gap properly needs an outbox, which is out of scope here. The same recovery
+  applies to an import that ended up `failed`: resending it returns `202` with `failed` and
+  does not retry, because a repeated import must never re-run processing.
