@@ -19,6 +19,8 @@
     </source>
     <php>
         <env name="APP_ENV" value="testing"/>
+        <!-- Error bodies are asserted exactly; with debug on they would carry a trace. -->
+        <env name="APP_DEBUG" value="false"/>
         <env name="CACHE_STORE" value="array"/>
         <!-- MySQL, not SQLite: the search and booking queries rely on engine-specific
              behaviour (window functions, FOR UPDATE, unique index semantics).
