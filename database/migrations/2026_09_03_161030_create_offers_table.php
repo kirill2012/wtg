@@ -30,11 +30,14 @@ return new class extends Migration
 
             $table->unique(['supplier_id', 'external_id']);
 
-            // Two access paths for the property search: from the requested dates, or from
-            // the property side when the city filter narrows properties first. Both end in
-            // (property_id, price) so the per-property ranking reads rows already ordered.
+            // Serves both access paths of the property search: an equality lookup on the two dates
+            // when the search starts from them, and a three-column equality lookup when the
+            // city filter narrows properties first (property_id then comes from the join).
+            // Checked with EXPLAIN: a mirrored (property_id, check_in, check_out, price)
+            // index was never chosen over this one, so it is not kept. MySQL always sorts
+            // for the window function regardless of index order; the sort covers only the
+            // rows matching the dates. The foreign key adds its own index on property_id.
             $table->index(['check_in', 'check_out', 'property_id', 'price']);
-            $table->index(['property_id', 'check_in', 'check_out', 'price']);
         });
     }
 
