@@ -35,6 +35,7 @@ class StoreImportTest extends TestCase
         $import = Import::query()->sole();
         $response
             ->assertAccepted()
+            ->assertHeader('Location', route('imports.show', $import))
             ->assertExactJson(['data' => ['id' => $import->id, 'status' => 'pending']]);
 
         $this->assertTrue($import->supplier->is(Supplier::query()->where('slug', 'supplier-a')->sole()));
