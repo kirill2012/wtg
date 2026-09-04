@@ -13,7 +13,9 @@ return [
     |
     */
 
-    'default' => env('QUEUE_CONNECTION', 'database'),
+    // 'redis', like the cache store: the fallback should be the stack the application is
+    // documented to run on. The `jobs` table stays, so 'database' remains selectable.
+    'default' => env('QUEUE_CONNECTION', 'redis'),
 
     /*
     |--------------------------------------------------------------------------

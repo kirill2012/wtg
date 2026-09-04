@@ -26,7 +26,9 @@
              behaviour (window functions, FOR UPDATE, unique index semantics).
              DB_HOST/DB_USERNAME/DB_PASSWORD deliberately fall through to the environment. -->
         <env name="DB_CONNECTION" value="mysql"/>
-        <env name="DB_DATABASE" value="wtg_test"/>
+        <!-- Forced: PHPUnit leaves an existing environment variable alone, and an exported
+             DB_DATABASE would send RefreshDatabase's migrate:fresh at the working database. -->
+        <env name="DB_DATABASE" value="wtg_test" force="true"/>
         <env name="DB_URL" value=""/>
         <env name="QUEUE_CONNECTION" value="sync"/>
     </php>
