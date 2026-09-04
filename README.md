@@ -13,7 +13,7 @@ PHP 8.5 · Laravel 12 · MySQL 8.4 · Redis 7 (queue, cache) · nginx · Docker.
 git clone https://github.com/kirill2012/wtg.git && cd wtg
 cp .env.example .env
 cp docker/.env.example docker/.env    # then set UID/GID to your `id -u` / `id -g`
-docker compose -f docker/docker-compose.yml up -d --build
+docker compose -f docker/docker-compose.yml up -d --build --wait
 make -C docker artisan c="db:seed"    # the two suppliers: supplier-a, supplier-b
 ```
 
@@ -23,6 +23,10 @@ directory, not from the project root. Keep `DB_DATABASE`, `DB_USERNAME` and `DB_
 identical in both. Without `docker/.env` every value falls back to the default baked into
 `docker-compose.yml`, but the containers write into the bind mount as uid 1000.
 
+`--wait` matters: without it Compose returns as soon as the containers are *started*, and
+the seed above can outrun the migrations. The `app` health check probes php-fpm, which the
+entrypoint execs only after migrating, so a healthy `app` means the schema is in place.
+
 On first boot the `app` container generates `APP_KEY`, waits for MySQL and Redis and runs
 the migrations; the `queue` container starts a worker. nginx answers on
 <http://localhost> (`APP_URL` is `http://wtg.loc` — add it to `/etc/hosts` to use that
@@ -30,7 +34,8 @@ name); `/up` is the health check.
 
 ## Commands
 
-`docker/Makefile` runs everything inside the `app` container, from any directory.
+`docker/Makefile` drives the stack from any directory: the artisan and composer targets
+run inside the `app` container, the rest talk to Compose.
 
 | Command | What it does |
 | --- | --- |
@@ -40,7 +45,7 @@ name); `/up` is the health check.
 | `make -C docker fresh` | `php artisan migrate:fresh --seed` |
 | `make -C docker queue` | restart the queue worker — it runs the code loaded at start, so restart it after changing job or service code |
 | `make -C docker artisan c="queue:work"` | an extra worker in the foreground |
-| `make -C docker test` | the test suite (`c="test --filter=Import"` for a subset) |
+| `make -C docker test` | the test suite (`make -C docker artisan c="test --filter=Import"` for a subset) |
 | `make -C docker artisan c="..."` | any artisan command |
 | `vendor/bin/pint` | code style; runs on the host, needs no database |
 
@@ -69,8 +74,9 @@ php artisan test
 Requests and responses are JSON. Validation errors come back as `422` with Laravel's
 standard `{"message": ..., "errors": {...}}`, a missing record or route as `404
 {"message": "Not Found."}`, a state conflict as `409 {"message": "..."}`. Moments are
-serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds), calendar dates as
-`2026-10-10`. Prices are integers in minor units: `72500` is 725.00.
+serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates are accepted
+as `2026-10-10` and never appear in a response. Prices are integers in minor units:
+`72500` is 725.00.
 
 ### `POST /api/imports` — accept an import
 
@@ -237,13 +243,19 @@ not mistaken for oversights.
   and ignores the new payload; a different body under the same id is a supplier error.
 - Resending a `client_reference` with different customer data returns the original
   reservation; the reference identifies the request, not the customer fields.
+- A resend answers `200`, not the `201` the task names: the reservation it returns was
+  created by the earlier request, and claiming otherwise would misreport what happened.
+- A reservation snapshots `price` and `currency`, but not the property or the dates. A
+  later import may move the offer to another property or another stay, as the task
+  requires, and the reservation follows it; freezing the whole offer would need a second
+  copy of it and is out of scope.
 - External ids, property codes, cities and client references are compared without regard
   to case or diacritics (`utf8mb4_unicode_ci`): `BCN-0001` and `bcn-0001` are one
   property, `Barcelona` and `barcelona` match. `distinct:ignore_case` rejects duplicates
   that differ only in case within one payload; a pair differing only in diacritics
   collapses in the job. Leading and trailing whitespace is trimmed.
 - `sent_at` and `expires_at` are converted to UTC on write; a value without an offset is
-  read as UTC (`APP_TIMEZONE=UTC`).
+  read as UTC (`config/app.php` pins the application timezone to UTC).
 - `imports.payload` stores the validated subset of the request: values unchanged, unknown
   keys dropped. The data therefore lives twice, the price of knowing `total_offers` at once
   and of re-running an import without the supplier.
@@ -263,6 +275,10 @@ not mistaken for oversights.
   because `supplier + external_import_id` already exists. Recovery is a manual re-dispatch,
   which the job's `ShouldBeUnique` makes safe to do more than once:
   `php artisan tinker --execute 'App\Jobs\ProcessImportJob::dispatch(App\Models\Import::findOrFail(15));'`.
+  One caveat: the unique lock is taken *before* the push and is not released when the push
+  throws, so a re-dispatch within the hour of `$uniqueFor` is silently dropped. Wait it out,
+  or release the lock first:
+  `Cache::lock('laravel_unique_job:App\Jobs\ProcessImportJob:15')->forceRelease()`.
   Closing the gap properly needs an outbox, which is out of scope here. The same recovery
   applies to an import that ended up `failed`: resending it returns `202` with `failed` and
   does not retry, because a repeated import must never re-run processing.
