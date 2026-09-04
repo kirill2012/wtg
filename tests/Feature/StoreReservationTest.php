@@ -122,6 +122,19 @@ class StoreReservationTest extends TestCase
         $this->postJson(route('offers.reservations.store', $offer), $this->payload())->assertConflict();
     }
 
+    public function test_a_conflict_keeps_its_documented_shape_with_debug_on(): void
+    {
+        // The suite runs with APP_DEBUG off, where the default handler is already terse, but
+        // the documented installation runs with it on — and there Laravel attaches the
+        // exception, the file and the whole trace to a 409 unless the renderer intervenes.
+        config(['app.debug' => true]);
+        $offer = Offer::factory()->expired()->create();
+
+        $this->postJson(route('offers.reservations.store', $offer), $this->payload())
+            ->assertConflict()
+            ->assertExactJson(['message' => 'The offer has expired.']);
+    }
+
     public function test_an_offer_whose_supply_was_lowered_under_its_reservations_is_sold_out_not_negative(): void
     {
         // A later import may publish fewer units than are already reserved; the published

@@ -8,6 +8,8 @@ use App\Services\ImportService;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
@@ -57,6 +59,8 @@ class ProcessImportJob implements ShouldBeUnique, ShouldQueue
      */
     public function failed(?Throwable $exception): void
     {
+        Log::error('Import processing failed', ['import_id' => $this->import->getKey(), 'exception' => $exception]);
+
         $this->import->update([
             'status' => ImportStatus::Failed,
             'error' => $this->describe($exception),
@@ -64,12 +68,19 @@ class ProcessImportJob implements ShouldBeUnique, ShouldQueue
         ]);
     }
 
+    /**
+     * The `error` field is public, and a QueryException carries the failed statement with
+     * its bindings plus the host, port and name of the database. `Str::before()` cuts that
+     * tail; `failed()` has already logged the exception untouched.
+     */
     private function describe(?Throwable $exception): string
     {
         if ($exception === null) {
             return 'Unknown error';
         }
 
-        return $exception->getMessage() !== '' ? $exception->getMessage() : $exception::class;
+        $message = Str::before($exception->getMessage(), ' (Connection:');
+
+        return Str::limit($message !== '' ? $message : $exception::class, 500);
     }
 }

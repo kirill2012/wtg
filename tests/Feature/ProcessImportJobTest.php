@@ -261,7 +261,11 @@ class ProcessImportJobTest extends TestCase
         $import->refresh();
         $this->assertSame(ImportStatus::Failed, $import->status);
         $this->assertSame(1, $import->processed_offers);
+        // The field is public: the driver's message, and nothing of the statement, the
+        // bindings or the connection behind it.
         $this->assertStringContainsString('Out of range', (string) $import->error);
+        $this->assertStringNotContainsString('Connection:', (string) $import->error);
+        $this->assertStringNotContainsString('insert into', (string) $import->error);
         $this->assertNotNull($import->completed_at);
         $this->assertDatabaseHas('offers', ['external_id' => 'offer-a-10001']);
         $this->assertDatabaseMissing('offers', ['external_id' => 'offer-a-10002']);
