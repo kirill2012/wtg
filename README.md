@@ -78,6 +78,13 @@ serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates are 
 as `2026-10-10` and never appear in a response. Prices are integers in minor units:
 `72500` is 725.00.
 
+`wtg.postman_collection.json` in the repository root walks the whole of it — import,
+status, search, booking — and asserts every response against the contract described here.
+Import it into Postman, or run it headless with `npx newman run
+wtg.postman_collection.json`. The first request derives the run's dates and identifiers
+from the clock, so the collection can be run repeatedly without colliding with itself and
+without editing anything by hand.
+
 ### `POST /api/imports` — accept an import
 
 Body: `supplier` (slug), `external_import_id`, `sent_at`, `offers` (a list of 1 to 1000

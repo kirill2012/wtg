@@ -1,0 +1,765 @@
+{
+  "info": {
+    "name": "wtg — housing offers API",
+    "description": "Walks the whole API of the task: import → status → search → booking, plus the error paths.\n\nRun it top to bottom, or use the Collection Runner — every request asserts its own contract.\n\nThe first request generates the run's dates and identifiers, so the collection is idempotent: running it twice creates a separate import, property and offers instead of colliding with the previous run. Nothing has to be edited by hand.\n\nSet `baseUrl` if the stack is not on http://localhost.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost"
+    },
+    {
+      "key": "importId",
+      "value": ""
+    },
+    {
+      "key": "offerId",
+      "value": ""
+    },
+    {
+      "key": "reservationId",
+      "value": ""
+    },
+    {
+      "key": "pollAttempt",
+      "value": "0"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /up",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/up",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "up"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the application is up', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Imports",
+      "item": [
+        {
+          "name": "POST /api/imports — accept an import",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Everything this run needs, derived once. Unique ids keep repeated runs",
+                  "// independent; the date offset varies so two runs rarely share a stay.",
+                  "const now = Date.now();",
+                  "const day = 86400000;",
+                  "const pad = (n) => String(n).padStart(2, '0');",
+                  "const isoDate = (d) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;",
+                  "const isoMoment = (d) => d.toISOString().replace(/\\.\\d{3}Z$/, 'Z');",
+                  "const offset = 60 + (now % 150);",
+                  "",
+                  "pm.collectionVariables.set('checkIn', isoDate(new Date(now + offset * day)));",
+                  "pm.collectionVariables.set('checkOut', isoDate(new Date(now + (offset + 5) * day)));",
+                  "pm.collectionVariables.set('expiresAt', isoMoment(new Date(now + 30 * day)));",
+                  "pm.collectionVariables.set('sentAt', isoMoment(new Date(now)));",
+                  "pm.collectionVariables.set('externalImportId', `import-${now}`);",
+                  "pm.collectionVariables.set('propertyCode', `BCN-${now}`);",
+                  "pm.collectionVariables.set('externalIdA', `offer-a-${now}`);",
+                  "pm.collectionVariables.set('externalIdB', `offer-b-${now}`);",
+                  "pm.collectionVariables.set('clientReference', `web-order-${now}`);",
+                  "pm.collectionVariables.set('pollAttempt', '0');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 202 Accepted', () => pm.response.to.have.status(202));",
+                  "",
+                  "const accepted = pm.response.json();",
+                  "pm.test('body is { data: { id, status } } and nothing else', () => {",
+                  "    pm.expect(Object.keys(accepted)).to.eql(['data']);",
+                  "    pm.expect(Object.keys(accepted.data).sort()).to.eql(['id', 'status']);",
+                  "    pm.expect(accepted.data.status).to.eql('pending');",
+                  "});",
+                  "",
+                  "pm.test('Location points at the status endpoint', () => {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.include(`/api/imports/${accepted.data.id}`);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('importId', accepted.data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"supplier\": \"supplier-a\",\n  \"external_import_id\": \"{{externalImportId}}\",\n  \"sent_at\": \"{{sentAt}}\",\n  \"offers\": [\n    {\n      \"external_id\": \"{{externalIdA}}\",\n      \"property\": {\n        \"code\": \"{{propertyCode}}\",\n        \"name\": \"Apartment near Sagrada Familia\",\n        \"City\": \"Barcelona\"\n      },\n      \"check_in\": \"{{checkIn}}\",\n      \"check_out\": \"{{checkOut}}\",\n      \"max_guests\": 4,\n      \"price\": 72500,\n      \"currency\": \"EUR\",\n      \"available_units\": 2,\n      \"expires_at\": \"{{expiresAt}}\"\n    },\n    {\n      \"external_id\": \"{{externalIdB}}\",\n      \"property\": {\n        \"code\": \"{{propertyCode}}\",\n        \"name\": \"Apartment near Sagrada Familia\",\n        \"City\": \"Barcelona\"\n      },\n      \"check_in\": \"{{checkIn}}\",\n      \"check_out\": \"{{checkOut}}\",\n      \"max_guests\": 4,\n      \"price\": 69000,\n      \"currency\": \"EUR\",\n      \"available_units\": 1,\n      \"expires_at\": \"{{expiresAt}}\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/imports",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "imports"
+              ]
+            },
+            "description": "Two offers of one property, so the search has something to pick the cheapest from. The queue worker picks the job up from Redis; processing never happens in this request."
+          }
+        },
+        {
+          "name": "GET /api/imports/{id} — poll until completed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const imp = pm.response.json().data;",
+                  "",
+                  "pm.test('carries every field of the task', () => {",
+                  "    pm.expect(Object.keys(imp).sort()).to.eql([",
+                  "        'completed_at', 'created_at', 'error', 'external_import_id',",
+                  "        'id', 'processed_offers', 'sent_at', 'status', 'supplier', 'total_offers'",
+                  "    ]);",
+                  "    pm.expect(imp.supplier).to.eql('supplier-a');",
+                  "    pm.expect(imp.total_offers).to.eql(2);",
+                  "});",
+                  "",
+                  "pm.test('moments are UTC without microseconds', () => {",
+                  "    pm.expect(imp.sent_at).to.match(/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$/);",
+                  "    pm.expect(imp.created_at).to.match(/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$/);",
+                  "});",
+                  "",
+                  "pm.test('status is one of the four allowed', () => {",
+                  "    pm.expect(['pending', 'processing', 'completed', 'failed']).to.include(imp.status);",
+                  "});",
+                  "",
+                  "// In the Collection Runner this re-runs itself until the worker is done.",
+                  "// Running requests one by one, just hit Send again.",
+                  "const attempt = Number(pm.collectionVariables.get('pollAttempt')) + 1;",
+                  "pm.collectionVariables.set('pollAttempt', String(attempt));",
+                  "",
+                  "const pollAgain = () => {",
+                  "    // The sandbox has no sleep, and without a pause the poll burns every attempt in a",
+                  "    // few milliseconds — long before the worker has taken the job off the queue.",
+                  "    const until = Date.now() + 400;",
+                  "    while (Date.now() < until) { /* wait */ }",
+                  "",
+                  "    if (pm.execution && pm.execution.setNextRequest) {",
+                  "        pm.execution.setNextRequest(pm.info.requestName);",
+                  "    } else {",
+                  "        postman.setNextRequest(pm.info.requestName);",
+                  "    }",
+                  "};",
+                  "",
+                  "if (imp.status === 'completed') {",
+                  "    pm.test('every offer was processed', () => {",
+                  "        pm.expect(imp.processed_offers).to.eql(imp.total_offers);",
+                  "        pm.expect(imp.error).to.eql(null);",
+                  "        pm.expect(imp.completed_at).to.not.eql(null);",
+                  "    });",
+                  "} else if (imp.status === 'failed') {",
+                  "    pm.expect.fail(`the import failed: ${imp.error}`);",
+                  "} else if (attempt < 15) {",
+                  "    pollAgain();",
+                  "} else {",
+                  "    pm.expect.fail('still not completed after 15 polls — is the queue worker running?');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/imports/{{importId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "imports",
+                "{{importId}}"
+              ]
+            },
+            "description": "The asynchronous state of the import. In the Runner this request polls itself until the status is completed."
+          }
+        },
+        {
+          "name": "POST /api/imports — resending changes nothing",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 202 again', () => pm.response.to.have.status(202));",
+                  "",
+                  "const resent = pm.response.json().data;",
+                  "pm.test('returns the existing import, not a new one', () => {",
+                  "    pm.expect(String(resent.id)).to.eql(String(pm.collectionVariables.get('importId')));",
+                  "});",
+                  "",
+                  "pm.test('reports its current status, not pending', () => {",
+                  "    pm.expect(resent.status).to.eql('completed');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"supplier\": \"supplier-a\",\n  \"external_import_id\": \"{{externalImportId}}\",\n  \"sent_at\": \"{{sentAt}}\",\n  \"offers\": [\n    {\n      \"external_id\": \"{{externalIdA}}\",\n      \"property\": { \"code\": \"OTHER-0001\", \"name\": \"A different body\", \"City\": \"Madrid\" },\n      \"check_in\": \"{{checkIn}}\",\n      \"check_out\": \"{{checkOut}}\",\n      \"max_guests\": 1,\n      \"price\": 1,\n      \"currency\": \"EUR\",\n      \"available_units\": 9,\n      \"expires_at\": \"{{expiresAt}}\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/imports",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "imports"
+              ]
+            },
+            "description": "The same supplier + external_import_id with a deliberately different payload. The pair identifies an import, so the existing row comes back with its current status and the new payload is ignored — no duplicate, no second run of the job."
+          }
+        },
+        {
+          "name": "POST /api/imports — 422 on a bad body",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 422', () => pm.response.to.have.status(422));",
+                  "",
+                  "const invalid = pm.response.json();",
+                  "pm.test('names the fields that failed', () => {",
+                  "    pm.expect(Object.keys(invalid).sort()).to.eql(['errors', 'message']);",
+                  "    pm.expect(invalid.errors).to.have.property('supplier');",
+                  "    pm.expect(invalid.errors).to.have.property('offers');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"supplier\": \"supplier-does-not-exist\",\n  \"external_import_id\": \"broken\",\n  \"sent_at\": \"2026-09-01T10:00:00Z\",\n  \"offers\": []\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/imports",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "imports"
+              ]
+            },
+            "description": "An unknown supplier and an empty offers list. Validation happens in the request, so nothing is queued."
+          }
+        },
+        {
+          "name": "GET /api/imports/999999 — 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 404', () => pm.response.to.have.status(404));",
+                  "pm.test('does not name the model class', () => {",
+                  "    pm.expect(pm.response.json()).to.eql({ message: 'Not Found.' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/imports/999999",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "imports",
+                "999999"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Properties",
+      "item": [
+        {
+          "name": "GET /api/properties — cheapest offer per property",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const search = pm.response.json();",
+                  "const code = pm.collectionVariables.get('propertyCode');",
+                  "const row = search.data.find((r) => r.code === code);",
+                  "",
+                  "pm.test('the imported property is in the results', () => {",
+                  "    pm.expect(row, `property ${code} not found`).to.not.be.undefined;",
+                  "});",
+                  "",
+                  "pm.test('the row has the shape of the task', () => {",
+                  "    pm.expect(Object.keys(row).sort()).to.eql(['City', 'best_offer', 'code', 'name']);",
+                  "    pm.expect(Object.keys(row.best_offer).sort()).to.eql([",
+                  "        'available_units', 'currency', 'expires_at', 'id', 'price', 'supplier'",
+                  "    ]);",
+                  "    pm.expect(row.City).to.eql('Barcelona');",
+                  "});",
+                  "",
+                  "pm.test('the cheaper of the two offers wins', () => {",
+                  "    pm.expect(row.best_offer.price).to.eql(69000);",
+                  "    pm.expect(row.best_offer.available_units).to.eql(1);",
+                  "});",
+                  "",
+                  "pm.test('the property appears exactly once', () => {",
+                  "    pm.expect(search.data.filter((r) => r.code === code)).to.have.lengthOf(1);",
+                  "});",
+                  "",
+                  "pm.test('the envelope carries next, prev and per_page', () => {",
+                  "    pm.expect(search.links).to.have.property('next');",
+                  "    pm.expect(search.links).to.have.property('prev');",
+                  "    pm.expect(search.meta).to.have.property('per_page');",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('offerId', row.best_offer.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/properties?city=Barcelona&check_in={{checkIn}}&check_out={{checkOut}}&guests=2&per_page=100&page=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "properties"
+              ],
+              "query": [
+                {
+                  "key": "city",
+                  "value": "Barcelona"
+                },
+                {
+                  "key": "check_in",
+                  "value": "{{checkIn}}"
+                },
+                {
+                  "key": "check_out",
+                  "value": "{{checkOut}}"
+                },
+                {
+                  "key": "guests",
+                  "value": "2"
+                },
+                {
+                  "key": "per_page",
+                  "value": "100"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "The search of the task. Two offers were imported for this property; rank 1 by price is the one that comes back, and the property appears once."
+          }
+        },
+        {
+          "name": "GET /api/properties — 422 without dates",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 422', () => pm.response.to.have.status(422));",
+                  "pm.test('both dates are named', () => {",
+                  "    const errors = pm.response.json().errors;",
+                  "    pm.expect(errors).to.have.property('check_in');",
+                  "    pm.expect(errors).to.have.property('check_out');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/properties?city=Barcelona",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "properties"
+              ],
+              "query": [
+                {
+                  "key": "city",
+                  "value": "Barcelona"
+                }
+              ]
+            },
+            "description": "\"The cheapest offer for these dates\" is undefined without them, so the request is refused rather than answered with something arbitrary."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reservations",
+      "item": [
+        {
+          "name": "POST /api/offers/{id}/reservations — book the last unit",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 201 Created', () => pm.response.to.have.status(201));",
+                  "",
+                  "const reservation = pm.response.json().data;",
+                  "pm.test('returns the reservation, flat', () => {",
+                  "    pm.expect(Object.keys(reservation).sort()).to.eql([",
+                  "        'client_reference', 'created_at', 'currency', 'customer_email',",
+                  "        'customer_name', 'id', 'offer_id', 'price'",
+                  "    ]);",
+                  "    pm.expect(String(reservation.offer_id)).to.eql(String(pm.collectionVariables.get('offerId')));",
+                  "});",
+                  "",
+                  "pm.test('price and currency are a snapshot of the offer', () => {",
+                  "    pm.expect(reservation.price).to.eql(69000);",
+                  "    pm.expect(reservation.currency).to.eql('EUR');",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('reservationId', reservation.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"client_reference\": \"{{clientReference}}\",\n  \"customer_name\": \"John Smith\",\n  \"customer_email\": \"john@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/offers/{{offerId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "offers",
+                "{{offerId}}",
+                "reservations"
+              ]
+            },
+            "description": "The cheapest offer had exactly one unit, so this books the last one."
+          }
+        },
+        {
+          "name": "POST — resending the same reference is idempotent",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 200, not 201 — nothing was created', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('returns the reservation made the first time', () => {",
+                  "    pm.expect(String(pm.response.json().data.id))",
+                  "        .to.eql(String(pm.collectionVariables.get('reservationId')));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"client_reference\": \"{{clientReference}}\",\n  \"customer_name\": \"John Smith\",\n  \"customer_email\": \"john@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/offers/{{offerId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "offers",
+                "{{offerId}}",
+                "reservations"
+              ]
+            },
+            "description": "The same request again. The reference identifies the request, so the original reservation comes back and no second unit is taken."
+          }
+        },
+        {
+          "name": "POST — 409 once the offer is sold out",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 409', () => pm.response.to.have.status(409));",
+                  "",
+                  "pm.test('says so in the documented shape, without a trace', () => {",
+                  "    pm.expect(pm.response.json()).to.eql({ message: 'The offer is sold out.' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"client_reference\": \"{{clientReference}}-second\",\n  \"customer_name\": \"Jane Smith\",\n  \"customer_email\": \"jane@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/offers/{{offerId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "offers",
+                "{{offerId}}",
+                "reservations"
+              ]
+            },
+            "description": "A different customer for the unit that has just gone. This is the sequential form of the race the row lock protects against."
+          }
+        },
+        {
+          "name": "POST /api/offers/999999/reservations — 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 404', () => pm.response.to.have.status(404));",
+                  "pm.test('one neutral message', () => {",
+                  "    pm.expect(pm.response.json()).to.eql({ message: 'Not Found.' });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"client_reference\": \"{{clientReference}}-missing\",\n  \"customer_name\": \"John Smith\",\n  \"customer_email\": \"john@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/offers/999999/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "offers",
+                "999999",
+                "reservations"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
