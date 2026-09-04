@@ -150,6 +150,63 @@ class ImportConcurrencyTest extends TestCase
         $this->assertDatabaseCount('offers', 2);
     }
 
+    public function test_an_offer_committed_by_another_worker_mid_flight_is_updated_not_lost(): void
+    {
+        $supplier = Supplier::query()->where('slug', 'supplier-a')->sole();
+        $import = Import::factory()->for($supplier)->create([
+            'sent_at' => '2026-09-01 10:00:00',
+            'payload' => [$this->offer('offer-a-10001')],
+            'total_offers' => 1,
+        ]);
+
+        // Committed up front, or the other worker's insert would wait on the foreign key.
+        $property = Property::factory()->create();
+        $otherImport = Import::factory()->for($supplier)->create(['sent_at' => '2026-09-01 09:00:00']);
+
+        // Plays the other worker: it commits our offer right after the plain lookup came back
+        // empty, and that lookup fixed this transaction's snapshot. Only a locking re-read
+        // sees the row afterwards; a plain one dies with ModelNotFoundException.
+        $raced = false;
+        DB::listen(function (QueryExecuted $query) use (&$raced, $supplier, $property, $otherImport): void {
+            if ($raced || ! str_starts_with($query->sql, 'select') || ! str_contains($query->sql, '`offers`')) {
+                return;
+            }
+
+            $raced = true;
+            DB::connection('mysql_secondary')->table('offers')->insert([
+                'supplier_id' => $supplier->id,
+                'property_id' => $property->id,
+                'import_id' => $otherImport->id,
+                'external_id' => 'offer-a-10001',
+                'sent_at' => $otherImport->sent_at,
+                'check_in' => '2026-10-01',
+                'check_out' => '2026-10-05',
+                'max_guests' => 2,
+                'price' => 61000,
+                'currency' => 'EUR',
+                'available_units' => 1,
+                'reserved_units' => 1,
+                'expires_at' => '2026-09-10 23:59:59',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        });
+
+        ProcessImportJob::dispatchSync($import);
+
+        $this->assertTrue($raced);
+        $this->assertSame(ImportStatus::Completed, $import->fresh()->status);
+        $this->assertDatabaseCount('offers', 1);
+
+        // Our payload won, and reserved_units survived: an import never writes it.
+        $offer = Offer::query()->sole();
+        $this->assertSame(72500, $offer->price);
+        $this->assertSame('2026-10-10', $offer->check_in->toDateString());
+        $this->assertTrue($offer->import->is($import));
+        $this->assertSame('BCN-0001', $offer->property->code);
+        $this->assertSame(1, $offer->reserved_units);
+    }
+
     /**
      * One offer from the task description.
      *

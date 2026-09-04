@@ -49,6 +49,8 @@ class SearchPropertiesTest extends TestCase
         $this->search()
             ->assertOk()
             ->assertJsonCount(1, 'data')
+            // Two live offers on one property: a count over offers, not rank-1 rows, says 2.
+            ->assertJsonPath('meta.total', 1)
             ->assertJsonPath('data.0', [
                 'code' => 'BCN-0001',
                 'name' => 'Apartment near Sagrada Familia',

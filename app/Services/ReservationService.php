@@ -29,6 +29,10 @@ class ReservationService
      * State problems end in `abort(409)` right here: one body shape with the default 404
      * and 422, and no exception hierarchy for two cases.
      *
+     * The transaction is retried on a concurrency error: a deadlock or a lock wait timeout
+     * is transient, and unretried it surfaces as a 500 where a 201 or a 409 was reachable.
+     * Replaying is safe because `client_reference` makes the method idempotent.
+     *
      * @param  array{client_reference: string, customer_name: string, customer_email: string}  $data
      */
     public function reserve(Offer $offer, array $data): Reservation
@@ -82,7 +86,7 @@ class ReservationService
             $locked->increment('reserved_units');
 
             return $reservation;
-        });
+        }, attempts: 3);
     }
 
     /**

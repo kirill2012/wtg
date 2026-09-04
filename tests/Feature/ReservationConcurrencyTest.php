@@ -5,10 +5,12 @@ namespace Tests\Feature;
 use App\Models\Offer;
 use App\Services\ReservationService;
 use Illuminate\Database\Events\QueryExecuted;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\DatabaseTruncation;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\TestCase;
@@ -76,16 +78,31 @@ class ReservationConcurrencyTest extends TestCase
         // the 50-second server default instead of failing.
         DB::statement('SET SESSION innodb_lock_wait_timeout = 1');
 
+        // A lock wait timeout is transient, so reserve() replays the transaction rather than
+        // answering 500 on the first one. Counted on the default connection only: the other
+        // booking's transaction lives on the secondary.
+        $attempts = 0;
+        Event::listen(function (TransactionBeginning $event) use (&$attempts): void {
+            if ($event->connection->getName() === 'mysql') {
+                $attempts++;
+            }
+        });
+
         try {
             app(ReservationService::class)->reserve($offer, $this->payload());
             $this->fail('The booking went through while another transaction held the offer row.');
         } catch (QueryException $e) {
             // MySQL's 1205 sits in errorInfo[1]; getCode() carries the SQLSTATE string.
             $this->assertSame(1205, $e->errorInfo[1], $e->getMessage());
+            // The wait must be on the locking read itself. Without this the test passes with
+            // no lockForUpdate at all: the insert into reservations takes a shared lock on the
+            // parent offers row for its foreign key check and times out there instead.
+            $this->assertStringContainsString('for update', $e->getSql(), 'The timeout did not come from the locking read.');
         }
 
         $other->rollBack();
 
+        $this->assertSame(3, $attempts, 'The booking must be retried on a concurrency error.');
         $this->assertSame(0, $offer->fresh()->reserved_units);
         $this->assertDatabaseCount('reservations', 0);
     }
