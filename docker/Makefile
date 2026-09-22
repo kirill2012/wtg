@@ -1,7 +1,7 @@
 MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 DC ?= docker compose -f $(MAKEFILE_DIR)docker-compose.yml
 
-.PHONY: up down restart build rebuild sh root logs ps artisan composer test migrate fresh queue redis mysql
+.PHONY: up down restart build rebuild sh root logs ps artisan composer test migrate fresh queue mysql
 
 up: ## Start the whole stack
 	$(DC) up -d
@@ -47,9 +47,6 @@ fresh:
 
 queue: ## Restart the queue worker (pick up new code)
 	$(DC) restart queue
-
-redis:
-	$(DC) exec redis redis-cli
 
 mysql:
 	$(DC) exec mysql sh -c 'mysql -u"$$MYSQL_USER" -p"$$MYSQL_PASSWORD" "$$MYSQL_DATABASE"'

@@ -16,7 +16,7 @@ class ReservationController extends Controller
         $reservation = $reservationService->reserve($offer, $request->validated());
 
         // A resent request gets the reservation it made the first time, with 200 rather than 201.
-        return ReservationResource::make($reservation)
+        return ReservationResource::make($reservation->loadMissing('property'))
             ->response()
             ->setStatusCode($reservation->wasRecentlyCreated ? Response::HTTP_CREATED : Response::HTTP_OK);
     }

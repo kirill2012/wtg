@@ -23,9 +23,20 @@ class ReservationFactory extends Factory
             'client_reference' => 'web-order-'.fake()->unique()->regexify('[a-f0-9]{8}'),
             'customer_name' => fake()->name(),
             'customer_email' => fake()->safeEmail(),
-            // Price and currency are a snapshot of the offer at booking time.
-            'price' => fn (array $attributes) => Offer::query()->findOrFail($attributes['offer_id'])->price,
-            'currency' => fn (array $attributes) => Offer::query()->findOrFail($attributes['offer_id'])->currency,
         ];
+    }
+
+    /**
+     * Snapshot the offer as ReservationService does, keeping any value passed explicitly.
+     */
+    public function configure(): static
+    {
+        return $this->afterMaking(function (Reservation $reservation): void {
+            $offer = $reservation->offer;
+
+            foreach (['property_id', 'check_in', 'check_out', 'price', 'currency'] as $attribute) {
+                $reservation->{$attribute} ??= $offer->{$attribute};
+            }
+        });
     }
 }

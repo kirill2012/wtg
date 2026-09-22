@@ -30,6 +30,8 @@
              DB_DATABASE would send RefreshDatabase's migrate:fresh at the working database. -->
         <env name="DB_DATABASE" value="wtg_test" force="true"/>
         <env name="DB_URL" value=""/>
-        <env name="QUEUE_CONNECTION" value="sync"/>
+        <!-- The driver the application runs on: StoreImportTest asserts that the import and its
+             job row are written together. -->
+        <env name="QUEUE_CONNECTION" value="database"/>
     </php>
 </phpunit>

@@ -5,7 +5,7 @@ current offer per property, and books an offer safely under concurrency.
 
 Repository: <https://github.com/kirill2012/wtg>
 
-PHP 8.5 · Laravel 12 · MySQL 8.4 · Redis 7 (queue, cache) · nginx · Docker. API-only.
+PHP 8.5 · Laravel 12 · MySQL 8.4 (data, queue and cache) · nginx · Docker. API-only.
 
 ## Installation
 
@@ -27,7 +27,7 @@ identical in both. Without `docker/.env` every value falls back to the default b
 the seed above can outrun the migrations. The `app` health check probes php-fpm, which the
 entrypoint execs only after migrating, so a healthy `app` means the schema is in place.
 
-On first boot the `app` container generates `APP_KEY`, waits for MySQL and Redis and runs
+On first boot the `app` container generates `APP_KEY`, waits for MySQL and runs
 the migrations; the `queue` container starts a worker. nginx answers on
 <http://localhost> (`APP_URL` is `http://wtg.loc` — add it to `/etc/hosts` to use that
 name); `/up` is the health check.
@@ -44,7 +44,7 @@ run inside the `app` container, the rest talk to Compose.
 | `make -C docker artisan c="db:seed"` | seed the suppliers |
 | `make -C docker fresh` | `php artisan migrate:fresh --seed` |
 | `make -C docker queue` | restart the queue worker — it runs the code loaded at start, so restart it after changing job or service code |
-| `make -C docker artisan c="queue:work"` | an extra worker in the foreground |
+| `make -C docker artisan c="queue:work database"` | an extra worker in the foreground |
 | `make -C docker test` | the test suite (`make -C docker artisan c="test --filter=Import"` for a subset) |
 | `make -C docker artisan c="..."` | any artisan command |
 | `vendor/bin/pint` | code style; runs on the host, needs no database |
@@ -57,7 +57,7 @@ to reproduce real races; they run in the same suite.
 
 ## Without Docker
 
-Requires PHP 8.5+ with `pdo_mysql` and `redis`, Composer, MySQL 8 and Redis. Create the
+Requires PHP 8.5+ with `pdo_mysql`, Composer and MySQL 8. Create the
 `wtg` and `wtg_test` databases and point `.env` at them, then:
 
 ```bash
@@ -65,7 +65,7 @@ composer install
 cp .env.example .env && php artisan key:generate
 php artisan migrate && php artisan db:seed
 php artisan serve
-php artisan queue:work    # in a second terminal
+php artisan queue:work database    # in a second terminal
 php artisan test
 ```
 
@@ -74,8 +74,8 @@ php artisan test
 Requests and responses are JSON. Validation errors come back as `422` with Laravel's
 standard `{"message": ..., "errors": {...}}`, a missing record or route as `404
 {"message": "Not Found."}`, a state conflict as `409 {"message": "..."}`. Moments are
-serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates are accepted
-as `2026-10-10` and never appear in a response. Prices are integers in minor units:
+serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates stay
+`2026-10-10` in both directions. Prices are integers in minor units:
 `72500` is 725.00.
 
 `wtg.postman_collection.json` in the repository root walks the whole of it — import,
@@ -97,6 +97,11 @@ the structure and the supplier, stores the import together with its payload, que
 `supplier + external_import_id` identifies an import. Resending it returns the existing row
 with its *current* status (`completed` a minute later, not `pending`) and queues nothing,
 even when the payload differs.
+
+The import row and its job are written by **one transaction**: `ProcessImportJob` is
+pinned to the `database` queue on the application's own connection (`after_commit` off),
+whatever `QUEUE_CONNECTION` says. Either both rows are committed or neither is, so no
+import is left without a job; on failure the client gets a `500` and can safely resend.
 
 ### `GET /api/imports/{id}` — import status
 
@@ -121,11 +126,12 @@ followed as they are.
 
 Body: `client_reference`, `customer_name`, `customer_email`. Books one unit and answers
 `201` with the reservation: `id`, `offer_id`, `client_reference`, `customer_name`,
-`customer_email`, `price`, `currency`, `created_at`, where `price` and `currency` are a
-snapshot of the offer at booking time. Resending the same `client_reference` for the same
-offer answers `200` with the reservation made the first time, without taking another
-unit. `409` when the offer has expired, is sold out, or the reference already belongs to a
-reservation of another offer.
+`customer_email`, `property_code`, `check_in`, `check_out`, `price`, `currency`,
+`created_at`, where everything from `property_code` on is a snapshot of the offer at
+booking time and stays put when a later import changes it. Resending the same
+`client_reference` for the same offer answers `200` with the reservation made the first
+time, without taking another unit. `409` when the offer has expired, is sold out, or the
+reference already belongs to a reservation of another offer.
 
 ## Data model
 
@@ -134,14 +140,14 @@ that last wrote it; a reservation belongs to an offer.
 
 - `imports` — `supplier_id` + `external_import_id` (unique together), `sent_at`, `status`,
   `payload` (JSON, the offers as validated), `total_offers`, `processed_offers`, `error`,
-  `completed_at`.
+  `completed_at`, `claimed_by` (the uuid of the job processing it).
 - `properties` — `code` (unique), `name`, `city` (indexed).
 - `offers` — `supplier_id` + `external_id` (unique together), `property_id`, `import_id`
   and `sent_at` (which import last wrote the row and when the supplier produced it),
   `check_in`, `check_out`, `max_guests`, `price`, `currency`, `available_units`,
   `reserved_units`, `expires_at`.
-- `reservations` — `offer_id`, `client_reference` (unique), the customer fields, `price`,
-  `currency`.
+- `reservations` — `offer_id`, `client_reference` (unique), the customer fields, and the
+  snapshot of what was booked: `property_id`, `check_in`, `check_out`, `price`, `currency`.
 
 Availability is split in two columns on purpose. `available_units` belongs to the
 supplier and is written by imports only; `reserved_units` belongs to the application and
@@ -170,11 +176,18 @@ offers from `imports.payload` and applies them one by one, each in its own trans
    stale import must not overwrite fresher data. Otherwise every supplier-owned column
    plus `import_id` and `sent_at` are updated; `reserved_units` is never touched.
 
+Before the first offer the job **claims** the import with one conditional `UPDATE`
+that sets `status = 'processing'` and `claimed_by = <job uuid>`: allowed from `pending` or
+`failed`, and from `processing` only for the job already holding it (its retries keep the
+uuid). A second job for the same import — a manual re-dispatch — finds it taken or
+`completed` and does nothing. A database guard rather than a `ShouldBeUnique` cache lock,
+which would sit outside the transaction that queues the job.
+
 `processed_offers` grows after each offer; on success the import becomes `completed`. The
-job is unique per import (`ShouldBeUnique`, so a manual re-dispatch or `queue:retry`
-cannot run one import twice at once), retries three times with backoffs of 10 s and 60 s,
-and marks the import `failed` with the error text once the attempts are exhausted; a
-timed-out attempt counts as one, and between attempts the status stays `processing`.
+job retries three times with backoffs of 10 s and 60 s and marks the import `failed` with
+the error text once the attempts are exhausted — never an import that is already
+`completed`; a timed-out attempt counts as one, and between attempts the status stays
+`processing`.
 Because every offer is its own transaction, a failure part-way leaves the offers already
 written; a re-run is idempotent and catches up the rest.
 
@@ -182,8 +195,9 @@ Budget, measured on the local Docker stack (the worker is CLI without opcache; M
 flushes the log on every commit): an import of 1000 offers on 250 properties takes about
 22 s, a re-run without changes about 15 s. The time is dominated by the commit per offer,
 the price of the transaction-per-offer choice above. The 1000-offer cap on the payload,
-the worker's `--timeout=60`, Redis `retry_after=90` and the job's `$uniqueFor=3600` are
-related knobs: raise them together, after measuring on the target machine.
+the job's `$timeout = 60` (set on the job, so it holds whatever the worker is started with)
+and the queue's `retry_after=90` are related knobs: raise them together, after measuring
+on the target machine.
 
 ## Search query
 
@@ -214,7 +228,8 @@ The steps inside the transaction:
 2. look up an existing reservation by `client_reference`: found for the same offer, return
    it (`200`); for another offer, `409`;
 3. `409` if the offer has expired or `available_units - reserved_units < 1`;
-4. insert the reservation;
+4. insert the reservation, with the property, the stay, the price and the currency copied
+   off the locked offer;
 5. increment `reserved_units`.
 
 Two details are correctness, not style. The lock comes before the lookup because under
@@ -252,10 +267,12 @@ not mistaken for oversights.
   reservation; the reference identifies the request, not the customer fields.
 - A resend answers `200`, not the `201` the task names: the reservation it returns was
   created by the earlier request, and claiming otherwise would misreport what happened.
-- A reservation snapshots `price` and `currency`, but not the property or the dates. A
-  later import may move the offer to another property or another stay, as the task
-  requires, and the reservation follows it; freezing the whole offer would need a second
-  copy of it and is out of scope.
+- A reservation snapshots what was booked — the property, the stay, the price and the
+  currency. An offer is a mutable row: a later import of the same `external_id` may reprice
+  it, move it to another property or shift its dates, as the task requires, and a booking
+  that only pointed at the offer would silently follow it. `offer_id` still records which
+  offer the booking came from. `max_guests` is not snapshotted: a reservation has no guest
+  count of its own.
 - External ids, property codes, cities and client references are compared without regard
   to case or diacritics (`utf8mb4_unicode_ci`): `BCN-0001` and `bcn-0001` are one
   property, `Barcelona` and `barcelona` match. `distinct:ignore_case` rejects duplicates
@@ -276,18 +293,15 @@ not mistaken for oversights.
 
 ## Known limitations
 
-- **A failed queue push leaves the import `pending`.** The import row is committed before
-  the job is pushed. If the push fails (Redis unreachable), the client gets a 500 and the row
-  stays `pending` with nothing queued; a repeated `POST` returns that row without re-queuing,
-  because `supplier + external_import_id` already exists. Recovery is a manual re-dispatch,
-  which the job's `ShouldBeUnique` makes safe to do more than once:
+- **A `failed` import is never retried by resending it.** Its job ran and exhausted its
+  three attempts; a repeated `POST` returns the existing row and queues nothing, because a
+  repeated import must never re-run processing on its own. Recovery is `queue:retry` for the
+  job in `failed_jobs`, or a re-dispatch; the claim makes either safe to repeat:
   `php artisan tinker --execute 'App\Jobs\ProcessImportJob::dispatch(App\Models\Import::findOrFail(15));'`.
-  One caveat: the unique lock is taken *before* the push and is not released when the push
-  throws, so a re-dispatch within the hour of `$uniqueFor` is silently dropped. Wait it out,
-  or release the lock first:
-  `Cache::lock('laravel_unique_job:App\Jobs\ProcessImportJob:15')->forceRelease()`.
-  Closing the gap properly needs an outbox, which is out of scope here. The same recovery
-  applies to an import that ended up `failed`: resending it returns `202` with `failed` and
-  does not retry, because a repeated import must never re-run processing.
+- **The queue shares the database.** Workers poll the `jobs` table (`SELECT ... FOR UPDATE
+  SKIP LOCKED`), which adds load to the primary MySQL. That is comfortable at the volume of
+  supplier imports; at a much higher rate the transport would move to Redis or SQS with an
+  outbox table written in the import's transaction and relayed to the broker. The job and
+  its claim would stay as they are.
 - **Offset pagination over live data.** An offer that expires or sells out between two page
   requests shifts the rows after it by one; a cursor would fix that and is out of scope.

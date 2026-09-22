@@ -20,6 +20,9 @@ class Reservation extends Model
         'client_reference',
         'customer_name',
         'customer_email',
+        'property_id',
+        'check_in',
+        'check_out',
         'price',
         'currency',
     ];
@@ -30,6 +33,8 @@ class Reservation extends Model
     protected function casts(): array
     {
         return [
+            'check_in' => 'date',
+            'check_out' => 'date',
             'price' => 'integer',
         ];
     }
@@ -37,5 +42,14 @@ class Reservation extends Model
     public function offer(): BelongsTo
     {
         return $this->belongsTo(Offer::class);
+    }
+
+    /**
+     * The property as it stood at booking time, which is not necessarily the one the
+     * offer points at now.
+     */
+    public function property(): BelongsTo
+    {
+        return $this->belongsTo(Property::class);
     }
 }

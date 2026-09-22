@@ -13,9 +13,7 @@ return [
     |
     */
 
-    // 'redis', like the cache store: the fallback should be the stack the application is
-    // documented to run on. The `jobs` table stays, so 'database' remains selectable.
-    'default' => env('QUEUE_CONNECTION', 'redis'),
+    'default' => env('QUEUE_CONNECTION', 'database'),
 
     /*
     |--------------------------------------------------------------------------
@@ -39,10 +37,14 @@ return [
 
         'database' => [
             'driver' => 'database',
+            // Must stay the application's own connection (unset, or DB_CONNECTION): the job
+            // row is written by the transaction that writes the import only on that one.
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
             'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            // Must stay off: ImportService::accept() relies on the job row being inserted
+            // inside the transaction that inserts the import.
             'after_commit' => false,
         ],
 

@@ -12,19 +12,26 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class ImportService
 {
     /**
-     * Record an import and queue its processing.
+     * Record an import and queue its processing, atomically.
+     *
+     * The queue is the `database` driver on the application's own connection, so the import
+     * row and its job row are written by one transaction: either both are committed or
+     * neither is, and there is no import that nothing will process. ProcessImportJob pins
+     * itself to that connection; `after_commit` must stay off.
      *
      * The pair (supplier, external_import_id) identifies an import. Resending it returns
-     * the existing record as it currently stands and does not queue anything, even when
-     * the payload differs: a different body under the same id is a supplier error, not a
-     * new import. Two identical requests racing each other are settled by the unique key —
-     * `firstOrCreate` falls back to `createOrFirst`, which swallows the constraint violation
-     * and re-reads the winner's row with `wasRecentlyCreated === false`.
+     * the existing record as it currently stands and queues nothing, even when the payload
+     * differs: a different body under the same id is a supplier error, not a new import.
+     * Two identical requests racing each other are settled by the unique key; the loser's
+     * transaction is rolled back and the winner's row is read after it, outside any
+     * transaction, because a REPEATABLE READ snapshot taken before the winner committed
+     * would not show it.
      *
      * @param  array{supplier: string, external_import_id: string, sent_at: string, offers: list<array<string, mixed>>}  $data
      */
@@ -32,44 +39,58 @@ class ImportService
     {
         $supplier = Supplier::query()->where('slug', $data['supplier'])->firstOrFail();
 
-        $import = Import::query()->firstOrCreate(
-            [
-                'supplier_id' => $supplier->id,
-                'external_import_id' => $data['external_import_id'],
-            ],
-            [
-                // The supplier's offset is honoured but the column holds UTC; a naive cast
-                // would store `12:00:00+02:00` as 12:00 UTC.
-                'sent_at' => Carbon::parse($data['sent_at'])->utc(),
-                'status' => ImportStatus::Pending,
-                'payload' => $data['offers'],
-                'total_offers' => count($data['offers']),
-            ],
-        );
+        $keys = [
+            'supplier_id' => $supplier->id,
+            'external_import_id' => $data['external_import_id'],
+        ];
 
-        if ($import->wasRecentlyCreated) {
-            ProcessImportJob::dispatch($import);
+        $existing = Import::query()->where($keys)->first();
+
+        if ($existing !== null) {
+            return $existing;
         }
 
-        return $import;
+        try {
+            return DB::transaction(function () use ($keys, $data): Import {
+                $import = Import::query()->create([
+                    ...$keys,
+                    // The supplier's offset is honoured but the column holds UTC; a naive cast
+                    // would store `12:00:00+02:00` as 12:00 UTC.
+                    'sent_at' => Carbon::parse($data['sent_at'])->utc(),
+                    'status' => ImportStatus::Pending,
+                    'payload' => $data['offers'],
+                    'total_offers' => count($data['offers']),
+                ]);
+
+                ProcessImportJob::dispatch($import);
+
+                return $import;
+            });
+        } catch (UniqueConstraintViolationException) {
+            return Import::query()->where($keys)->firstOrFail();
+        }
     }
 
     /**
      * Apply every offer of the import's payload, each in its own transaction.
      *
-     * Runs inside ProcessImportJob. The counter and the error are reset first, so
-     * `processed_offers` always describes the current attempt. A failure part-way leaves
-     * the offers already written and the job marks the import failed; a re-run catches up
-     * the rest, because every step of `applyOffer()` is idempotent.
+     * Runs inside ProcessImportJob, and only once the job has claimed the import (see
+     * `claim()`); a job that cannot claim it leaves it alone. A failure part-way leaves the
+     * offers already written and the job marks the import failed; a re-run catches up the
+     * rest, because every step of `applyOffer()` is idempotent.
+     *
+     * @param  string  $claimant  the uuid of the queued job, the same on every attempt
      */
-    public function process(Import $import): void
+    public function process(Import $import, string $claimant): void
     {
-        $import->update([
-            'status' => ImportStatus::Processing,
-            'processed_offers' => 0,
-            'error' => null,
-            'completed_at' => null,
-        ]);
+        if (! $this->claim($import, $claimant)) {
+            Log::info('Import claimed by another job or already completed, skipping', [
+                'import_id' => $import->getKey(),
+                'status' => $import->status->value,
+            ]);
+
+            return;
+        }
 
         foreach ($import->payload as $offerData) {
             // Outside the offer's transaction on purpose. Under REPEATABLE READ a transaction
@@ -91,6 +112,41 @@ class ImportService
             'status' => ImportStatus::Completed,
             'completed_at' => now(),
         ]);
+    }
+
+    /**
+     * Move the import to `processing` in one conditional UPDATE, so that of two jobs for
+     * one import only one gets to run it. A second job — a manual re-dispatch, say — finds
+     * the import taken or completed and does nothing.
+     *
+     * `pending` is a new import, `failed` one being recovered. `processing` is claimable
+     * only by the job that holds it: its retries, and `queue:retry` of it, carry the same
+     * uuid. That also recovers an import whose `failed()` never got written.
+     *
+     * Success is read back rather than taken from the affected-row count: MySQL counts
+     * changed rows, and a retry that rewrites identical values would change none.
+     */
+    private function claim(Import $import, string $claimant): bool
+    {
+        Import::query()
+            ->whereKey($import->getKey())
+            ->where(function (Builder $query) use ($claimant): void {
+                $query->whereIn('status', [ImportStatus::Pending, ImportStatus::Failed])
+                    ->orWhere(fn (Builder $query) => $query
+                        ->where('status', ImportStatus::Processing)
+                        ->where('claimed_by', $claimant));
+            })
+            ->update([
+                'status' => ImportStatus::Processing,
+                'claimed_by' => $claimant,
+                'processed_offers' => 0,
+                'error' => null,
+                'completed_at' => null,
+            ]);
+
+        $import->refresh();
+
+        return $import->status === ImportStatus::Processing && $import->claimed_by === $claimant;
     }
 
     /**

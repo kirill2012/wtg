@@ -46,12 +46,20 @@ class ModelFactoriesTest extends TestCase
         $this->assertSame(0, $offer->free_units);
     }
 
-    public function test_a_reservation_snapshots_the_offer_price_and_currency(): void
+    public function test_a_reservation_snapshots_the_offer_it_was_booked_for(): void
     {
-        $offer = Offer::factory()->create(['price' => 72500, 'currency' => 'EUR']);
+        $offer = Offer::factory()->create([
+            'check_in' => '2026-10-10',
+            'check_out' => '2026-10-15',
+            'price' => 72500,
+            'currency' => 'EUR',
+        ]);
 
         $reservation = Reservation::factory()->for($offer)->create();
 
+        $this->assertTrue($reservation->property->is($offer->property));
+        $this->assertSame('2026-10-10', $reservation->check_in->toDateString());
+        $this->assertSame('2026-10-15', $reservation->check_out->toDateString());
         $this->assertSame(72500, $reservation->price);
         $this->assertSame('EUR', $reservation->currency);
     }

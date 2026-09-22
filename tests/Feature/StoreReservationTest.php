@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Offer;
+use App\Models\Property;
 use App\Models\Reservation;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -17,7 +18,15 @@ class StoreReservationTest extends TestCase
     public function test_it_books_one_unit_and_returns_the_reservation(): void
     {
         $this->travelTo('2026-09-03 12:00:00');
-        $offer = Offer::factory()->create(['price' => 72500, 'currency' => 'EUR', 'available_units' => 2]);
+        $offer = Offer::factory()
+            ->for(Property::factory()->create(['code' => 'BCN-0001']))
+            ->create([
+                'check_in' => '2026-10-10',
+                'check_out' => '2026-10-15',
+                'price' => 72500,
+                'currency' => 'EUR',
+                'available_units' => 2,
+            ]);
 
         $response = $this->postJson(route('offers.reservations.store', $offer), $this->payload());
 
@@ -30,6 +39,9 @@ class StoreReservationTest extends TestCase
                 'client_reference' => 'web-order-9f782b1c',
                 'customer_name' => 'John Smith',
                 'customer_email' => 'john@example.com',
+                'property_code' => 'BCN-0001',
+                'check_in' => '2026-10-10',
+                'check_out' => '2026-10-15',
                 'price' => 72500,
                 'currency' => 'EUR',
                 'created_at' => '2026-09-03T12:00:00Z',
@@ -49,6 +61,29 @@ class StoreReservationTest extends TestCase
         $offer->update(['price' => 99000, 'currency' => 'USD']);
 
         $this->assertDatabaseHas('reservations', ['offer_id' => $offer->id, 'price' => 72500, 'currency' => 'EUR']);
+    }
+
+    public function test_the_reservation_keeps_the_property_and_the_stay_the_offer_had_at_booking_time(): void
+    {
+        $booked = Property::factory()->create(['code' => 'BCN-0001']);
+        $offer = Offer::factory()->for($booked)->create(['check_in' => '2026-10-10', 'check_out' => '2026-10-15']);
+
+        $this->postJson(route('offers.reservations.store', $offer), $this->payload())->assertCreated();
+
+        // What a later import of the same external_id does to the row: the offer moves to
+        // another property and another stay, and the reservation must not move with it.
+        $offer->update([
+            'property_id' => Property::factory()->create(['code' => 'MAD-0007'])->id,
+            'check_in' => '2026-11-01',
+            'check_out' => '2026-11-03',
+        ]);
+
+        $this->assertDatabaseHas('reservations', [
+            'offer_id' => $offer->id,
+            'property_id' => $booked->id,
+            'check_in' => '2026-10-10',
+            'check_out' => '2026-10-15',
+        ]);
     }
 
     public function test_the_last_unit_can_be_booked_only_once(): void

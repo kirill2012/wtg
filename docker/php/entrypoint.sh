@@ -59,7 +59,6 @@ if [ -f .env ] && grep -qE '^APP_KEY=[[:space:]]*$' .env; then
 fi
 
 [ -n "${DB_HOST}" ] && wait_for "${DB_HOST}" "${DB_PORT:-3306}" "MySQL"
-[ -n "${REDIS_HOST}" ] && wait_for "${REDIS_HOST}" "${REDIS_PORT:-6379}" "Redis"
 
 if [ "${RUN_MIGRATIONS}" = "true" ]; then
     log "running database migrations"

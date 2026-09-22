@@ -151,7 +151,7 @@
                 "imports"
               ]
             },
-            "description": "Two offers of one property, so the search has something to pick the cheapest from. The queue worker picks the job up from Redis; processing never happens in this request."
+            "description": "Two offers of one property, so the search has something to pick the cheapest from. The queue worker picks the job up from the `jobs` table; processing never happens in this request."
           }
         },
         {
@@ -549,13 +549,16 @@
                   "const reservation = pm.response.json().data;",
                   "pm.test('returns the reservation, flat', () => {",
                   "    pm.expect(Object.keys(reservation).sort()).to.eql([",
-                  "        'client_reference', 'created_at', 'currency', 'customer_email',",
-                  "        'customer_name', 'id', 'offer_id', 'price'",
+                  "        'check_in', 'check_out', 'client_reference', 'created_at', 'currency',",
+                  "        'customer_email', 'customer_name', 'id', 'offer_id', 'price', 'property_code'",
                   "    ]);",
                   "    pm.expect(String(reservation.offer_id)).to.eql(String(pm.collectionVariables.get('offerId')));",
                   "});",
                   "",
-                  "pm.test('price and currency are a snapshot of the offer', () => {",
+                  "pm.test('the property, the stay, the price and the currency are a snapshot of the offer', () => {",
+                  "    pm.expect(reservation.property_code).to.eql(pm.collectionVariables.get('propertyCode'));",
+                  "    pm.expect(reservation.check_in).to.eql(pm.collectionVariables.get('checkIn'));",
+                  "    pm.expect(reservation.check_out).to.eql(pm.collectionVariables.get('checkOut'));",
                   "    pm.expect(reservation.price).to.eql(69000);",
                   "    pm.expect(reservation.currency).to.eql('EUR');",
                   "});",

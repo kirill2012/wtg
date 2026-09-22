@@ -66,7 +66,10 @@ class ReservationService
                     'client_reference' => $data['client_reference'],
                     'customer_name' => $data['customer_name'],
                     'customer_email' => $data['customer_email'],
-                    // A snapshot: the supplier may reprice the offer afterwards.
+                    // A snapshot: a later import may reprice, move or reschedule the offer.
+                    'property_id' => $locked->property_id,
+                    'check_in' => $locked->check_in,
+                    'check_out' => $locked->check_out,
                     'price' => $locked->price,
                     'currency' => $locked->currency,
                 ]);

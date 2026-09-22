@@ -15,10 +15,7 @@ return [
     |
     */
 
-    // 'redis', not Laravel's default 'database': this application ships no cache tables, so
-    // the default fails the first import on the ShouldBeUnique lock. Not 'file' either — that
-    // lock holds only while every worker shares a filesystem, and stops holding in silence.
-    'default' => env('CACHE_STORE', 'redis'),
+    'default' => env('CACHE_STORE', 'database'),
 
     /*
     |--------------------------------------------------------------------------

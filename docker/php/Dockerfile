@@ -28,22 +28,6 @@ RUN install-php-extensions \
         pdo_mysql \
         zip
 
-# phpredis: built from the pinned GitHub tag rather than PECL, whose CDN host is not
-# resolvable from every build environment.
-ARG PHPREDIS_VERSION=6.3.0
-RUN set -eux; \
-    curl -fsSL "https://github.com/phpredis/phpredis/archive/refs/tags/${PHPREDIS_VERSION}.tar.gz" -o /tmp/phpredis.tar.gz; \
-    mkdir -p /usr/src/phpredis; \
-    tar -xzf /tmp/phpredis.tar.gz -C /usr/src/phpredis --strip-components=1; \
-    cd /usr/src/phpredis; \
-    phpize; \
-    ./configure --enable-redis-igbinary=no --enable-redis-lzf=no --enable-redis-zstd=no; \
-    make -j"$(nproc)"; \
-    make install; \
-    docker-php-ext-enable redis; \
-    php -m | grep -qx redis; \
-    rm -rf /usr/src/phpredis /tmp/phpredis.tar.gz
-
 COPY docker/php/php.ini /usr/local/etc/php/conf.d/zz-app.ini
 COPY docker/php/www.conf /usr/local/etc/php-fpm.d/zz-www.conf
 COPY docker/php/entrypoint.sh /usr/local/bin/entrypoint

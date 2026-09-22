@@ -10,9 +10,9 @@ use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Bus;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\DataProvider;
+use RuntimeException;
 use Tests\TestCase;
 
 class StoreImportTest extends TestCase
@@ -57,12 +57,6 @@ class StoreImportTest extends TestCase
 
         $first = $this->postJson(route('imports.store'), $this->payload());
 
-        // ProcessImportJob is ShouldBeUnique and the lock is taken before the dispatcher,
-        // i.e. even under Bus::fake(), which never releases it. Without a flush the second
-        // dispatch would be swallowed by the lock and this test would pass against a
-        // service that dispatches unconditionally.
-        Cache::flush();
-
         $second = $this->postJson(route('imports.store'), $this->payload());
 
         $second->assertAccepted()->assertJsonPath('data.id', $first->json('data.id'));
@@ -91,7 +85,6 @@ class StoreImportTest extends TestCase
     {
         Bus::fake();
         $this->postJson(route('imports.store'), $this->payload());
-        Cache::flush(); // see test_resending_the_same_import_neither_duplicates_nor_requeues_it
 
         $changed = $this->payload();
         $changed['offers'][0]['price'] = 1;
@@ -111,7 +104,7 @@ class StoreImportTest extends TestCase
         $supplier = Supplier::query()->where('slug', 'supplier-a')->sole();
 
         // Plays the other worker: the row appears after the service's lookup and before
-        // its insert, so the insert hits the unique key and createOrFirst re-reads.
+        // its insert, so the insert hits the unique key and the service re-reads.
         $raced = false;
         DB::listen(function (QueryExecuted $query) use (&$raced, $supplier): void {
             if ($raced || ! str_starts_with($query->sql, 'select') || ! str_contains($query->sql, '`imports`')) {
@@ -128,6 +121,41 @@ class StoreImportTest extends TestCase
         $response->assertAccepted()->assertJsonPath('data.status', 'completed');
         $this->assertDatabaseCount('imports', 1);
         Bus::assertNotDispatched(ProcessImportJob::class);
+    }
+
+    public function test_the_import_and_its_job_are_written_together(): void
+    {
+        $this->postJson(route('imports.store'), $this->payload())->assertAccepted();
+
+        $import = Import::query()->sole();
+        $job = DB::table('jobs')->sole();
+        $command = unserialize(json_decode($job->payload, true)['data']['command']);
+
+        $this->assertInstanceOf(ProcessImportJob::class, $command);
+        $this->assertTrue($command->import->is($import));
+    }
+
+    public function test_the_job_goes_to_the_database_queue_whatever_the_default_connection(): void
+    {
+        config(['queue.default' => 'sync']);
+
+        $this->postJson(route('imports.store'), $this->payload())->assertAccepted();
+
+        $this->assertSame('pending', Import::query()->sole()->status->value);
+        $this->assertDatabaseCount('jobs', 1);
+    }
+
+    public function test_an_import_whose_job_cannot_be_queued_is_not_recorded_either(): void
+    {
+        DB::beforeExecuting(function (string $query): void {
+            if (str_starts_with($query, 'insert into `jobs`')) {
+                throw new RuntimeException('The queue is unavailable');
+            }
+        });
+
+        $this->postJson(route('imports.store'), $this->payload())->assertInternalServerError();
+
+        $this->assertDatabaseCount('imports', 0);
     }
 
     public function test_the_same_external_import_id_is_a_separate_import_for_another_supplier(): void

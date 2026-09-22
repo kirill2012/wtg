@@ -7,17 +7,25 @@ use App\Jobs\ProcessImportJob;
 use App\Models\Import;
 use App\Models\Offer;
 use App\Models\Property;
+use App\Models\Reservation;
 use App\Models\Supplier;
+use App\Services\ImportService;
 use Database\Seeders\SupplierSeeder;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Queue\Jobs\FakeJob;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
 use Tests\TestCase;
 
 class ProcessImportJobTest extends TestCase
 {
     use RefreshDatabase;
+
+    private const string OWNER = '0b6f3c2e-7a41-4d8e-9c55-2f1e8a9b7d10';
+
+    private const string DUPLICATE = 'e4a1d9b3-58c2-4f67-a0b8-6c3d2e1f9a47';
 
     private Supplier $supplier;
 
@@ -212,6 +220,30 @@ class ProcessImportJobTest extends TestCase
         $this->assertSame(3, $offer->free_units);
     }
 
+    public function test_a_reservation_keeps_the_property_and_the_stay_it_was_booked_for(): void
+    {
+        ProcessImportJob::dispatchSync($this->import([$this->offer()], ['sent_at' => '2026-09-01 09:00:00']));
+        $offer = Offer::query()->sole();
+        $booked = $offer->property;
+        $reservation = Reservation::factory()->for($offer)->create();
+
+        ProcessImportJob::dispatchSync($this->import([
+            $this->offer([
+                'property' => ['code' => 'MAD-0007', 'name' => 'Flat in Malasaña', 'City' => 'Madrid'],
+                'check_in' => '2026-11-01',
+                'check_out' => '2026-11-03',
+            ]),
+        ]));
+
+        $offer->refresh();
+        $this->assertSame('MAD-0007', $offer->property->code, 'The import must move the offer for this to prove anything');
+
+        $reservation->refresh();
+        $this->assertTrue($reservation->property->is($booked));
+        $this->assertSame('2026-10-10', $reservation->check_in->toDateString());
+        $this->assertSame('2026-10-15', $reservation->check_out->toDateString());
+    }
+
     public function test_losing_the_insert_race_to_another_worker_continues_with_that_row(): void
     {
         $import = $this->import([$this->offer(['price' => 69900])]);
@@ -294,6 +326,8 @@ class ProcessImportJobTest extends TestCase
         $import = $this->import([$this->offer(), $this->offer(['external_id' => 'offer-a-10002'])]);
 
         ProcessImportJob::dispatchSync($import);
+        // A completed import is not claimable; a failed one, being recovered, is.
+        $import->update(['status' => ImportStatus::Failed]);
         ProcessImportJob::dispatchSync($import);
 
         $this->assertDatabaseCount('offers', 2);
@@ -301,6 +335,129 @@ class ProcessImportJobTest extends TestCase
         $import->refresh();
         $this->assertSame(2, $import->total_offers);
         $this->assertSame(2, $import->processed_offers);
+    }
+
+    public function test_a_second_job_leaves_an_import_another_job_is_processing_alone(): void
+    {
+        $import = $this->import([$this->offer()], [
+            'status' => ImportStatus::Processing,
+            'claimed_by' => self::OWNER,
+            'processed_offers' => 3,
+        ]);
+
+        // A manual re-dispatch, say: it must neither run the import a second time nor reset
+        // its counter.
+        ProcessImportJob::dispatchSync($import);
+
+        $import->refresh();
+        $this->assertSame(ImportStatus::Processing, $import->status);
+        $this->assertSame(self::OWNER, $import->claimed_by);
+        $this->assertSame(3, $import->processed_offers);
+        $this->assertDatabaseCount('offers', 0);
+    }
+
+    public function test_the_job_holding_the_import_takes_it_over_again(): void
+    {
+        // A retry, or `queue:retry` of a job whose `failed()` never got written: the same
+        // uuid. Nothing about the row changes, time included, so the UPDATE matches the row
+        // and changes none of it — the claim must not mistake that for losing.
+        $this->freezeSecond();
+        $import = $this->import([$this->offer()], ['status' => ImportStatus::Processing, 'claimed_by' => self::OWNER]);
+
+        app(ImportService::class)->process($import, self::OWNER);
+
+        $import->refresh();
+        $this->assertSame(ImportStatus::Completed, $import->status);
+        $this->assertSame(1, $import->processed_offers);
+        $this->assertDatabaseCount('offers', 1);
+    }
+
+    public function test_a_second_job_leaves_an_import_that_is_already_completed_alone(): void
+    {
+        $import = $this->import([$this->offer()]);
+        ProcessImportJob::dispatchSync($import);
+        $completedAt = $import->refresh()->completed_at;
+        $this->travelTo(now()->addMinute());
+
+        // A client that has already polled `completed` must not see `processing` again.
+        ProcessImportJob::dispatchSync($import->fresh());
+
+        $import->refresh();
+        $this->assertSame(ImportStatus::Completed, $import->status);
+        $this->assertSame(1, $import->processed_offers);
+        $this->assertTrue($import->completed_at->equalTo($completedAt));
+    }
+
+    public function test_a_second_job_that_gives_up_does_not_take_a_completed_import_back(): void
+    {
+        $import = $this->import([$this->offer()]);
+        ProcessImportJob::dispatchSync($import);
+        $completedAt = $import->refresh()->completed_at;
+
+        // A duplicate that exhausts its attempts — its claim kept failing, say — must not
+        // show a client already told `completed` a `failed` import.
+        (new ProcessImportJob($import))->failed(new RuntimeException('Lock wait timeout exceeded'));
+
+        $import->refresh();
+        $this->assertSame(ImportStatus::Completed, $import->status);
+        $this->assertNull($import->error);
+        $this->assertTrue($import->completed_at->equalTo($completedAt));
+    }
+
+    public function test_a_second_job_that_gives_up_leaves_an_import_another_job_is_processing_alone(): void
+    {
+        $import = $this->import([$this->offer()], ['status' => ImportStatus::Processing, 'claimed_by' => self::OWNER]);
+
+        // Marked `failed`, the import would be claimable by a third job while its owner runs.
+        $this->jobRunningAs($import, self::DUPLICATE)->failed(new RuntimeException('Lock wait timeout exceeded'));
+
+        $import->refresh();
+        $this->assertSame(ImportStatus::Processing, $import->status);
+        $this->assertSame(self::OWNER, $import->claimed_by);
+        $this->assertNull($import->error);
+    }
+
+    public function test_the_job_holding_the_import_marks_it_failed_when_it_gives_up(): void
+    {
+        $import = $this->import([$this->offer()], ['status' => ImportStatus::Processing, 'claimed_by' => self::OWNER]);
+
+        $this->jobRunningAs($import, self::OWNER)->failed(new RuntimeException('Lock wait timeout exceeded'));
+
+        $import->refresh();
+        $this->assertSame(ImportStatus::Failed, $import->status);
+        $this->assertSame('Lock wait timeout exceeded', $import->error);
+        $this->assertNotNull($import->completed_at);
+    }
+
+    public function test_a_job_that_gives_up_before_claiming_marks_a_pending_import_failed(): void
+    {
+        // Its claim never went through — the database was down, say — and nothing else will
+        // process the import, so it must not hang in `pending`.
+        $import = $this->import([$this->offer()]);
+
+        $this->jobRunningAs($import, self::OWNER)->failed(new RuntimeException('Connection refused'));
+
+        $this->assertSame(ImportStatus::Failed, $import->refresh()->status);
+    }
+
+    /**
+     * The job as the queue hands it to `failed()`: with a job instance carrying its uuid.
+     */
+    private function jobRunningAs(Import $import, string $uuid): ProcessImportJob
+    {
+        $job = new ProcessImportJob($import);
+
+        $job->setJob(new class($uuid) extends FakeJob
+        {
+            public function __construct(private string $jobUuid) {}
+
+            public function getRawBody(): string
+            {
+                return (string) json_encode(['uuid' => $this->jobUuid]);
+            }
+        });
+
+        return $job;
     }
 
     /**

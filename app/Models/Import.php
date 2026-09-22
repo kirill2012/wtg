@@ -27,6 +27,7 @@ class Import extends Model
         'processed_offers',
         'error',
         'completed_at',
+        'claimed_by',
     ];
 
     /**

@@ -5,7 +5,6 @@ name: wtg
 # PHPUnit does not overwrite variables that already exist in the real environment.
 x-app-env: &app-env
   DB_HOST: mysql
-  REDIS_HOST: redis
 
 x-app: &app
   build:
@@ -32,8 +31,6 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "php", "-r", "exit(@fsockopen('127.0.0.1', 9000) ? 0 : 1);"]
       interval: 10s
@@ -57,7 +54,7 @@ services:
     <<: *app
     # Unprivileged so job logs stay owned by the host user in the bind mount.
     user: www-data
-    command: php artisan queue:work --tries=3 --timeout=60 --sleep=1 --max-time=3600
+    command: php artisan queue:work database --tries=3 --timeout=60 --sleep=1 --max-time=3600
     environment:
       <<: *app-env
       RUN_MIGRATIONS: "false"
@@ -87,20 +84,5 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    ports:
-      - "${FORWARD_REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-
 volumes:
   mysql-data:
-  redis-data:
