@@ -17,15 +17,11 @@ docker compose -f docker/docker-compose.yml up -d --build --wait
 make -C docker artisan c="db:seed"    # the two suppliers: supplier-a, supplier-b
 ```
 
-Two env files on purpose: the root `.env` is the application's, `docker/.env` feeds the
-`${...}` substitutions in `docker-compose.yml` — Compose loads it from the compose file's
-directory, not from the project root. Keep `DB_DATABASE`, `DB_USERNAME` and `DB_PASSWORD`
-identical in both. Without `docker/.env` every value falls back to the default baked into
-`docker-compose.yml`, but the containers write into the bind mount as uid 1000.
+The root `.env` is the application's; `docker/.env` feeds the `${...}` substitutions in
+`docker-compose.yml`. Keep `DB_DATABASE`, `DB_USERNAME` and `DB_PASSWORD` identical in both.
 
-`--wait` matters: without it Compose returns as soon as the containers are *started*, and
-the seed above can outrun the migrations. The `app` health check probes php-fpm, which the
-entrypoint execs only after migrating, so a healthy `app` means the schema is in place.
+`--wait` returns only once `app` is healthy, which happens after the migrations, so the seed
+cannot outrun them.
 
 On first boot the `app` container generates `APP_KEY`, waits for MySQL and runs
 the migrations; the `queue` container starts a worker. nginx answers on
@@ -49,11 +45,9 @@ run inside the `app` container, the rest talk to Compose.
 | `make -C docker artisan c="..."` | any artisan command |
 | `vendor/bin/pint` | code style; runs on the host, needs no database |
 
-Tests run against MySQL rather than SQLite, so they exercise the same engine as the
-application — the search and booking queries depend on window functions,
+Tests run against MySQL, not SQLite: the search and booking depend on window functions,
 `SELECT ... FOR UPDATE` and unique index semantics. `phpunit.xml` points at `wtg_test`,
-which MySQL creates on its first boot. Two test classes open a second database connection
-to reproduce real races; they run in the same suite.
+which MySQL creates on its first boot.
 
 ## Without Docker
 
@@ -81,9 +75,8 @@ serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates stay
 `wtg.postman_collection.json` in the repository root walks the whole of it — import,
 status, search, booking — and asserts every response against the contract described here.
 Import it into Postman, or run it headless with `npx newman run
-wtg.postman_collection.json`. The first request derives the run's dates and identifiers
-from the clock, so the collection can be run repeatedly without colliding with itself and
-without editing anything by hand.
+wtg.postman_collection.json`; it can be rerun as is, since its identifiers are derived from
+the clock.
 
 ### `POST /api/imports` — accept an import
 
@@ -99,9 +92,9 @@ with its *current* status (`completed` a minute later, not `pending`) and queues
 even when the payload differs.
 
 The import row and its job are written by **one transaction**: `ProcessImportJob` is
-pinned to the `database` queue on the application's own connection (`after_commit` off),
-whatever `QUEUE_CONNECTION` says. Either both rows are committed or neither is, so no
-import is left without a job; on failure the client gets a `500` and can safely resend.
+pinned to the `database` queue on the application's own connection, whatever
+`QUEUE_CONNECTION` says. No import is left without a job; on failure the client gets a
+`500` and can safely resend.
 
 ### `GET /api/imports/{id}` — import status
 
@@ -149,18 +142,14 @@ that last wrote it; a reservation belongs to an offer.
 - `reservations` — `offer_id`, `client_reference` (unique), the customer fields, and the
   snapshot of what was booked: `property_id`, `check_in`, `check_out`, `price`, `currency`.
 
-Availability is split in two columns on purpose. `available_units` belongs to the
-supplier and is written by imports only; `reserved_units` belongs to the application and
-is written by bookings only. An offer is bookable while `available_units >
-reserved_units`; the API publishes the difference under the key `available_units`, clamped
-at zero, never the raw column.
+Availability is split in two columns: `available_units` is written by imports only,
+`reserved_units` by bookings only. The API publishes their difference, clamped at zero,
+under the key `available_units`.
 
 One composite index serves the search, `offers (check_in, check_out, property_id, price)`:
-an equality lookup on the dates when the search starts from them, and a three-column
-lookup when a `city` filter makes the optimizer start from `properties (city)`. A mirrored
-`(property_id, check_in, check_out, price)` index was tried and dropped, `EXPLAIN` never
-chose it over this one. MySQL sorts for the window function regardless of index order, but
-only the rows that match the dates.
+the dates alone, or the dates plus `property_id` when a `city` filter makes the optimizer
+start from `properties (city)`. A mirrored `(property_id, ...)` index was dropped:
+`EXPLAIN` never chose it.
 
 ## Import processing
 
@@ -168,48 +157,35 @@ The HTTP request validates, stores and queues; nothing else. `ProcessImportJob` 
 offers from `imports.payload` and applies them one by one, each in its own transaction:
 
 1. the property is found or created by `code` — outside the offer's transaction, because
-   under `REPEATABLE READ` a transaction's snapshot would hide a property another worker
-   has just committed; an existing property is never updated;
+   under `REPEATABLE READ` its snapshot would hide a property another worker has just
+   committed;
 2. a plain lookup by `supplier + external_id`; a new offer is inserted, an existing one is
    re-read with `SELECT ... FOR UPDATE`;
-3. if the row was last written by an import with a later `sent_at`, it is left alone: a
-   stale import must not overwrite fresher data. Otherwise every supplier-owned column
-   plus `import_id` and `sent_at` are updated; `reserved_units` is never touched.
+3. if the row was last written by an import with a later `sent_at`, it is left alone;
+   equal timestamps update. `reserved_units` is never touched.
 
 Before the first offer the job **claims** the import with one conditional `UPDATE`
 that sets `status = 'processing'` and `claimed_by = <job uuid>`: allowed from `pending` or
 `failed`, and from `processing` only for the job already holding it (its retries keep the
-uuid). A second job for the same import — a manual re-dispatch — finds it taken or
-`completed` and does nothing. A database guard rather than a `ShouldBeUnique` cache lock,
-which would sit outside the transaction that queues the job.
+uuid). A second job for the same import finds it taken or `completed` and does nothing.
+A `ShouldBeUnique` cache lock would sit outside the transaction that queues the job.
 
-`processed_offers` grows after each offer; on success the import becomes `completed`. The
-job retries three times with backoffs of 10 s and 60 s and marks the import `failed` with
-the error text once the attempts are exhausted — never an import that is already
-`completed`; a timed-out attempt counts as one, and between attempts the status stays
-`processing`.
-Because every offer is its own transaction, a failure part-way leaves the offers already
-written; a re-run is idempotent and catches up the rest.
+On success the import becomes `completed`. The job makes three attempts (backoff 10 s,
+60 s), then marks the import `failed` with the error text. A failure part-way leaves the
+offers already written; a re-run is idempotent and catches up the rest.
 
-Budget, measured on the local Docker stack (the worker is CLI without opcache; MySQL
-flushes the log on every commit): an import of 1000 offers on 250 properties takes about
-22 s, a re-run without changes about 15 s. The time is dominated by the commit per offer,
-the price of the transaction-per-offer choice above. The 1000-offer cap on the payload,
-the job's `$timeout = 60` (set on the job, so it holds whatever the worker is started with)
-and the queue's `retry_after=90` are related knobs: raise them together, after measuring
-on the target machine.
+On the local Docker stack an import of 1000 offers takes about 22 s, dominated by the
+commit per offer. The 1000-offer cap, the job's `$timeout = 60` and the queue's
+`retry_after=90` are related: raise them together.
 
 ## Search query
 
 Cheapest-per-property, ordering and pagination all happen in SQL; nothing is grouped in
 PHP. A ranking subquery numbers each property's live offers with `ROW_NUMBER() OVER
 (PARTITION BY property_id ORDER BY price, id)`; the outer query joins `offers` to rank 1,
-orders by `price, property_id` (the tiebreaker keeps pages from overlapping on equal
-prices) and paginates. Rank 1 is one offer per property, so a page of offers is a page of
-properties, and the rows are real `Offer` models with `property` and `supplier`
-eager-loaded: four queries per request whatever the page size. The paginator runs the
-ranking subquery twice (count and page) and MySQL materialises it each time; acceptable at
-this scale.
+orders by `price, property_id` (the tiebreaker keeps pages from overlapping) and
+paginates. Four queries per request whatever the page size: count, page, and eager-loaded
+`property` and `supplier`.
 
 ## Booking the last unit
 
@@ -217,10 +193,8 @@ Two simultaneous bookings of the last unit are settled by **one mechanism: the r
 the offer**. `ReservationService::reserve()` runs in a transaction that opens with
 `SELECT ... FOR UPDATE` on the offer row and holds the lock until commit. The second
 request waits on it, then reads `reserved_units` already incremented by the first and gets
-`409 The offer is sold out.` Nothing else decides this. The unique key on
-`client_reference` is about *idempotency* of a resent request, not a second line of
-defence: two concurrent requests for the last unit carry different references and both
-pass it.
+`409 The offer is sold out.` The unique key on `client_reference` serves idempotency only:
+two concurrent requests for the last unit carry different references.
 
 The steps inside the transaction:
 
@@ -232,20 +206,13 @@ The steps inside the transaction:
    off the locked offer;
 5. increment `reserved_units`.
 
-Two details are correctness, not style. The lock comes before the lookup because under
-`REPEATABLE READ` the transaction's snapshot is fixed by its first plain read: taken after
-the lock, it includes what a competing request for the same offer committed while we
-waited, so a resent request that lost that race finds the winner's reservation instead of
-a spurious "sold out". The insert comes before the increment because MySQL rolls back
-only the failed statement on a duplicate key: when the same reference lands from a
-concurrent request for another offer, the conflict is caught, the row is re-read with a
-locking read (a plain one would look into the stale snapshot, which is why Laravel's
-`createOrFirst` is not used here) and answered with `409`, and no unit has been taken.
+The order matters. The lock comes before the lookup because under `REPEATABLE READ` the
+snapshot is fixed by the first plain read, so a resent request that lost the race finds
+the winner's reservation instead of a spurious "sold out". The insert comes before the
+increment because MySQL rolls back only the failed statement on a duplicate key, so a
+caught conflict takes no unit.
 
-`ReservationConcurrencyTest` checks this on two real database connections instead of by
-reasoning: one connection holds `FOR UPDATE` on the offer while the real service runs on
-the other and must fail with MySQL error 1205 leaving nothing behind, and a reservation
-committed by the other connection mid-flight must be found despite the snapshot.
+`ReservationConcurrencyTest` checks the lock on two real database connections.
 
 ## Assumptions
 
@@ -255,24 +222,15 @@ not mistaken for oversights.
 - Prices are compared as raw minor units, so the cheapest offer is correct within one
   currency; currency conversion is out of scope.
 - Search matches `check_in` and `check_out` exactly, as the task states; no overlap logic.
-- One reservation is one unit; the request has no quantity field.
 - A supplier may publish `available_units` below what is already reserved. The column is
   stored as sent, existing reservations stay, the published remainder is clamped at zero
   and the offer leaves the search.
-- Order between imports is decided by `sent_at`, not by processing order: an import with
-  an older `sent_at` processed later does not overwrite an offer; equal timestamps update.
-- Resending an `external_import_id` with a different payload returns the existing import
-  and ignores the new payload; a different body under the same id is a supplier error.
 - Resending a `client_reference` with different customer data returns the original
   reservation; the reference identifies the request, not the customer fields.
 - A resend answers `200`, not the `201` the task names: the reservation it returns was
   created by the earlier request, and claiming otherwise would misreport what happened.
-- A reservation snapshots what was booked — the property, the stay, the price and the
-  currency. An offer is a mutable row: a later import of the same `external_id` may reprice
-  it, move it to another property or shift its dates, as the task requires, and a booking
-  that only pointed at the offer would silently follow it. `offer_id` still records which
-  offer the booking came from. `max_guests` is not snapshotted: a reservation has no guest
-  count of its own.
+- A reservation snapshots the property, the stay, the price and the currency: a later
+  import may change the offer, and the booking must not follow it.
 - External ids, property codes, cities and client references are compared without regard
   to case or diacritics (`utf8mb4_unicode_ci`): `BCN-0001` and `bcn-0001` are one
   property, `Barcelona` and `barcelona` match. `distinct:ignore_case` rejects duplicates
@@ -280,16 +238,13 @@ not mistaken for oversights.
   collapses in the job. Leading and trailing whitespace is trimmed.
 - `sent_at` and `expires_at` are converted to UTC on write; a value without an offset is
   read as UTC (`config/app.php` pins the application timezone to UTC).
-- `imports.payload` stores the validated subset of the request: values unchanged, unknown
-  keys dropped. The data therefore lives twice, the price of knowing `total_offers` at once
-  and of re-running an import without the supplier.
-- `City` keeps its capital letter in the import body and in the search response, following
-  the task's contract literally; the column is `city`.
+- `imports.payload` stores the validated request offers, so an import can be re-run
+  without the supplier.
+- `City` keeps its capital letter in the API, as in the task; the column is `city`.
 - A property is not updated after creation: two suppliers describe one object differently,
   and last-writer-wins would make its name flicker between imports.
-- State conflicts are raised as `abort(409)` from the service layer: one body shape with
-  the default `404` and `422`, and no exception hierarchy for two cases. A deliberate
-  shortcut, not an oversight.
+- State conflicts are raised as `abort(409)` from the service layer, with no exception
+  hierarchy for two cases.
 
 ## Known limitations
 
@@ -299,9 +254,7 @@ not mistaken for oversights.
   job in `failed_jobs`, or a re-dispatch; the claim makes either safe to repeat:
   `php artisan tinker --execute 'App\Jobs\ProcessImportJob::dispatch(App\Models\Import::findOrFail(15));'`.
 - **The queue shares the database.** Workers poll the `jobs` table (`SELECT ... FOR UPDATE
-  SKIP LOCKED`), which adds load to the primary MySQL. That is comfortable at the volume of
-  supplier imports; at a much higher rate the transport would move to Redis or SQS with an
-  outbox table written in the import's transaction and relayed to the broker. The job and
-  its claim would stay as they are.
+  SKIP LOCKED`), which adds load to MySQL. At a much higher rate the transport would move
+  to Redis or SQS behind an outbox table.
 - **Offset pagination over live data.** An offer that expires or sells out between two page
   requests shifts the rows after it by one; a cursor would fix that and is out of scope.

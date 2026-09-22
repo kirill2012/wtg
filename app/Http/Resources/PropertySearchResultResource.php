@@ -9,10 +9,9 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * One row of GET /api/properties: a property together with its best offer.
  *
- * Wraps an Offer, not a Property: the search query keeps exactly one offer per property
- * (rank 1 of the price ranking), so the offer *is* the property row and its `property`
- * relation supplies the property fields. Expects `property` and `supplier` to be loaded.
- * `City` keeps the capital letter of the task's contract; the column is `city`.
+ * Wraps an Offer, not a Property: the search keeps one offer per property, and its
+ * `property` relation supplies the property fields. Expects `property` and `supplier` to be
+ * loaded. `City` keeps the task contract's capital letter.
  *
  * @mixin Offer
  */

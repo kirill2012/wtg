@@ -20,18 +20,12 @@ class ImportService
     /**
      * Record an import and queue its processing, atomically.
      *
-     * The queue is the `database` driver on the application's own connection, so the import
-     * row and its job row are written by one transaction: either both are committed or
-     * neither is, and there is no import that nothing will process. ProcessImportJob pins
-     * itself to that connection; `after_commit` must stay off.
+     * The queue is the `database` driver on the same connection, so the import and its job
+     * row commit together or not at all. `after_commit` must stay off.
      *
-     * The pair (supplier, external_import_id) identifies an import. Resending it returns
-     * the existing record as it currently stands and queues nothing, even when the payload
-     * differs: a different body under the same id is a supplier error, not a new import.
-     * Two identical requests racing each other are settled by the unique key; the loser's
-     * transaction is rolled back and the winner's row is read after it, outside any
-     * transaction, because a REPEATABLE READ snapshot taken before the winner committed
-     * would not show it.
+     * A resent (supplier, external_import_id) returns the existing import and queues
+     * nothing, even if the payload differs. A race is settled by the unique key; the
+     * winner's row is re-read outside the transaction, whose snapshot would not show it.
      *
      * @param  array{supplier: string, external_import_id: string, sent_at: string, offers: list<array<string, mixed>>}  $data
      */
@@ -54,8 +48,7 @@ class ImportService
             return DB::transaction(function () use ($keys, $data): Import {
                 $import = Import::query()->create([
                     ...$keys,
-                    // The supplier's offset is honoured but the column holds UTC; a naive cast
-                    // would store `12:00:00+02:00` as 12:00 UTC.
+                    // A naive cast would store `12:00:00+02:00` as 12:00 UTC.
                     'sent_at' => Carbon::parse($data['sent_at'])->utc(),
                     'status' => ImportStatus::Pending,
                     'payload' => $data['offers'],
@@ -72,12 +65,9 @@ class ImportService
     }
 
     /**
-     * Apply every offer of the import's payload, each in its own transaction.
-     *
-     * Runs inside ProcessImportJob, and only once the job has claimed the import (see
-     * `claim()`); a job that cannot claim it leaves it alone. A failure part-way leaves the
-     * offers already written and the job marks the import failed; a re-run catches up the
-     * rest, because every step of `applyOffer()` is idempotent.
+     * Apply every offer of the payload, each in its own transaction, once the job has
+     * claimed the import. A failure part-way keeps the offers already written; a re-run
+     * catches up the rest, because `applyOffer()` is idempotent.
      *
      * @param  string  $claimant  the uuid of the queued job, the same on every attempt
      */
@@ -93,16 +83,12 @@ class ImportService
         }
 
         foreach ($import->payload as $offerData) {
-            // Outside the offer's transaction on purpose. Under REPEATABLE READ a transaction
-            // reads the snapshot of its first plain SELECT, so a worker that loses the insert
-            // race on a new code would not see the winner's row when firstOrCreate re-reads
-            // it and would fail instead. In autocommit every statement gets a fresh snapshot.
-            // A property left without offers if the step below fails is harmless: it is
-            // find-or-create only.
+            // Outside the offer's transaction: under REPEATABLE READ, a worker losing the
+            // insert race on a new code would not see the winner's row when firstOrCreate
+            // re-reads it. A property left without offers is harmless.
             $property = $this->findOrCreateProperty($offerData['property']);
 
-            // Concurrent inserts on the unique index can deadlock; a deadlocked attempt is
-            // rolled back and replayed, which is safe because the step is idempotent.
+            // Concurrent inserts on the unique index can deadlock; replaying is safe.
             DB::transaction(fn () => $this->applyOffer($import, $property, $offerData), attempts: 3);
 
             $import->increment('processed_offers');
@@ -115,16 +101,12 @@ class ImportService
     }
 
     /**
-     * Move the import to `processing` in one conditional UPDATE, so that of two jobs for
-     * one import only one gets to run it. A second job — a manual re-dispatch, say — finds
-     * the import taken or completed and does nothing.
+     * Move the import to `processing` in one conditional UPDATE, so only one job runs it.
+     * Claimable: `pending`, `failed` (recovery), and `processing` held by the same uuid
+     * (retries and `queue:retry`).
      *
-     * `pending` is a new import, `failed` one being recovered. `processing` is claimable
-     * only by the job that holds it: its retries, and `queue:retry` of it, carry the same
-     * uuid. That also recovers an import whose `failed()` never got written.
-     *
-     * Success is read back rather than taken from the affected-row count: MySQL counts
-     * changed rows, and a retry that rewrites identical values would change none.
+     * Success is read back, not taken from the affected-row count: MySQL counts changed
+     * rows, and a retry rewriting identical values changes none.
      */
     private function claim(Import $import, string $claimant): bool
     {
@@ -173,8 +155,7 @@ class ImportService
             'external_id' => $data['external_id'],
         ];
 
-        // Everything the supplier owns, plus the provenance of this write. `reserved_units`
-        // is absent on purpose: imports never touch it.
+        // `reserved_units` is absent on purpose: imports never touch it.
         $values = [
             'property_id' => $property->id,
             'import_id' => $import->id,
@@ -188,31 +169,24 @@ class ImportService
             'expires_at' => Carbon::parse($data['expires_at'])->utc(),
         ];
 
-        // A plain lookup first, not a locking one: a locking read of a key that does not
-        // exist yet takes a gap lock on the index range around it, and two workers inserting
-        // different new offers of one supplier would then deadlock on each other's gaps.
+        // A plain lookup, not a locking one: locking a missing key gap-locks its range,
+        // and two workers inserting different new offers would deadlock.
         if (Offer::query()->where($keys)->doesntExist()) {
             try {
                 Offer::query()->create(array_merge($keys, $values));
 
                 return;
             } catch (UniqueConstraintViolationException) {
-                // Another worker inserted the row between our lookup and our insert. MySQL
-                // rolls back only the failed statement, and the locking read below sees the
-                // committed row regardless of this transaction's snapshot — which is why
-                // createOrFirst, whose fallback is a plain read, is not used here.
+                // Another worker inserted it meanwhile. Only the locking read below sees
+                // that row past our snapshot; createOrFirst falls back to a plain read.
             }
         }
 
-        // The row lock is what makes the staleness check trustworthy: without it two workers
-        // holding imports sent at 09:00 and 10:00 would both read the old sent_at, both decide
-        // to write, and whichever commits last would win — the stale one, in exactly the case
-        // the check exists for. The row exists by now, so the lock covers the record only, not
-        // a gap. ReservationService takes the same lock, so the two cannot form a cycle.
+        // The row lock makes the staleness check reliable: without it two workers could
+        // both read the old sent_at and the staler import could commit last.
         $offer = $this->lockedOffer($keys)->firstOrFail();
 
-        // Order is decided by sent_at, not by which import happened to be processed first.
-        // Equal timestamps update; skipping is not an error and still counts as processed.
+        // The newer sent_at wins, whatever the processing order. A skip counts as processed.
         if ($offer->sent_at->greaterThan($import->sent_at)) {
             return;
         }

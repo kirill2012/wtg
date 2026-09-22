@@ -13,12 +13,9 @@ use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Processes the offers stored in an import's payload.
- *
- * Pinned to the `database` connection: ImportService::accept() writes the import and this
- * job in one transaction, which no other driver can join. Not `ShouldBeUnique`: a cache
- * lock would sit outside that transaction; two jobs for one import are kept apart by the
- * import's status instead — see `ImportService::claim()`.
+ * Pinned to the `database` connection so ImportService::accept() can write the import and
+ * this job in one transaction. Duplicate jobs are kept apart by the import's status (see
+ * `ImportService::claim()`), not by `ShouldBeUnique`, whose cache lock sits outside it.
  */
 class ProcessImportJob implements ShouldQueue
 {
@@ -27,8 +24,8 @@ class ProcessImportJob implements ShouldQueue
     public int $tries = 3;
 
     /**
-     * Seconds per attempt, whatever the worker was started with. Must stay below the
-     * connection's `retry_after`, or a slow attempt would be handed to a second worker.
+     * Must stay below the connection's `retry_after`, or a slow attempt would be handed to
+     * a second worker.
      */
     public int $timeout = 60;
 
@@ -53,29 +50,24 @@ class ProcessImportJob implements ShouldQueue
      */
     public function handle(ImportService $importService): void
     {
-        // No uuid only when the job runs outside a queue, e.g. called directly.
+        // No job instance when run directly, outside a queue.
         $importService->process($this->import, $this->job?->uuid() ?? (string) Str::uuid());
     }
 
     /**
-     * Runs once the attempts are exhausted — a timed-out or crashed attempt counts as one —
-     * so an import never hangs in `processing`. Between attempts the status stays `processing`.
+     * Runs once the attempts are exhausted, so an import never hangs in `processing`.
      *
-     * A conditional update: only an import nobody has claimed yet, or one this job holds and
-     * has not completed. An import being processed by another job stays as it is — a
-     * duplicate that gives up must not report someone else's work as failed, nor make it
-     * claimable by a third job while the owner is still running.
+     * Only an unclaimed import, or one this job holds and has not completed, is marked
+     * failed: a duplicate that gives up must not fail another job's work.
      *
-     * One edge remains: a duplicate that gives up on a `pending` import before its own job
-     * has started marks it `failed`; the owner then claims it back and a client polling in
-     * between sees `failed` followed by `completed`. Duplicates only come from a manual
-     * re-dispatch, so this is accepted rather than guarded against.
+     * Accepted edge: a duplicate giving up on a `pending` import before the owner starts
+     * makes a client see `failed`, then `completed`. Duplicates only come from a manual
+     * re-dispatch.
      */
     public function failed(?Throwable $exception): void
     {
         Log::error('Import processing failed', ['import_id' => $this->import->getKey(), 'exception' => $exception]);
 
-        // Laravel sets the job instance before calling `failed()`; null only when called directly.
         $claimant = $this->job?->uuid();
 
         Import::query()
@@ -97,9 +89,8 @@ class ProcessImportJob implements ShouldQueue
     }
 
     /**
-     * The `error` field is public, and a QueryException carries the failed statement with
-     * its bindings plus the host, port and name of the database. `Str::before()` cuts that
-     * tail; `failed()` has already logged the exception untouched.
+     * `error` is public: cut the SQL, bindings and connection details a QueryException
+     * appends. The full exception is logged by `failed()`.
      */
     private function describe(?Throwable $exception): string
     {

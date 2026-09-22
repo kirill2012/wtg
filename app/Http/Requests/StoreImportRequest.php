@@ -18,10 +18,9 @@ class StoreImportRequest extends FormRequest
     /**
      * Get the validation rules that apply to the request.
      *
-     * Every offer scalar is `required` on purpose: the job reads the stored payload as a
-     * plain array, so a missing field would surface as a NOT NULL failure in the queue
-     * (import `failed`) instead of a 422 here. `City` keeps the capital letter of the
-     * supplier contract; the column is `city`.
+     * Every offer field is required: the job reads the payload as a plain array, so a
+     * missing one would fail the import in the queue instead of giving a 422 here. `City`
+     * keeps the supplier contract's capital letter.
      *
      * @return array<string, ValidationRule|array<mixed>|string>
      */
@@ -41,12 +40,11 @@ class StoreImportRequest extends FormRequest
             'offers.*.property.code' => ['required', 'string', 'max:255'],
             'offers.*.property.name' => ['required', 'string', 'max:255'],
             'offers.*.property.City' => ['required', 'string', 'max:255'],
-            // Calendar dates, not moments: the search compares them with `=` against a DATE
-            // column, so a time part or an offset must not sneak in on either side.
+            // Calendar dates, not moments: the search compares them with `=` against a DATE column.
             'offers.*.check_in' => ['required', 'date_format:Y-m-d'],
             'offers.*.check_out' => ['required', 'date_format:Y-m-d', 'after:offers.*.check_in'],
-            // Both columns are unsigned INT; the cap turns an absurd value into a 422 here
-            // instead of an out-of-range failure in the job.
+            // Here and on available_units the cap gives a 422 instead of an out-of-range
+            // failure in the job.
             'offers.*.max_guests' => ['required', 'integer', 'min:1', 'max:65535'],
             'offers.*.price' => ['required', 'integer', 'min:0'],
             'offers.*.currency' => ['required', 'string', 'size:3', 'alpha:ascii'],

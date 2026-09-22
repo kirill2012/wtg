@@ -15,19 +15,13 @@ class PropertySearchService
     private const int DEFAULT_PER_PAGE = 15;
 
     /**
-     * The cheapest live offer of every matching property, cheapest first, one row per
-     * property, paginated in SQL.
+     * The cheapest live offer of every matching property, cheapest first, paginated in SQL.
      *
-     * An offer is live when its dates equal the requested ones, it fits the guests, it has
-     * units left beyond what is reserved, and it has not expired. The ranking subquery
-     * numbers each property's live offers by price; the outer query keeps rank 1 only, so a
-     * page of offers is a page of properties and the hydrated models carry their casts and
-     * relations like any other Offer.
+     * The outer query keeps rank 1 of the ranking subquery, so a page of offers is a page
+     * of properties. The paginator runs that subquery twice (count and page); fine at this
+     * scale.
      *
-     * The paginator runs the ranking subquery twice per request (count and page), and MySQL
-     * materialises the derived table each time. Fine at this scale.
-     *
-     * Query-string values arrive as strings even after the `integer` rule, hence the casts.
+     * Query-string values stay strings after the `integer` rule, hence the casts.
      *
      * @param  array{check_in: string, check_out: string, guests?: int|string|null, city?: string|null, per_page?: int|string|null}  $filters
      * @return LengthAwarePaginator<int, Offer>
@@ -39,8 +33,7 @@ class PropertySearchService
             ->joinSub($this->rankedLiveOffers($filters), 'ranked', function (JoinClause $join): void {
                 $join->on('ranked.id', '=', 'offers.id')->where('ranked.rn', '=', 1);
             })
-            // property_id breaks ties on price; without a total order pages could overlap
-            // or skip rows.
+            // A total order, or pages could overlap or skip rows.
             ->orderBy('offers.price')
             ->orderBy('offers.property_id')
             ->with(['property', 'supplier'])
@@ -48,9 +41,8 @@ class PropertySearchService
     }
 
     /**
-     * Live offers numbered by price within their property: rank 1 is the property's best.
-     * The city join is added only when the filter is present, so the optimizer can start
-     * from `properties (city)` in that case and from the dates index otherwise.
+     * Live offers numbered by price within their property. The city join is added only
+     * when filtering, so the optimizer can otherwise start from the dates index.
      *
      * @param  array{check_in: string, check_out: string, guests?: int|string|null, city?: string|null}  $filters
      */

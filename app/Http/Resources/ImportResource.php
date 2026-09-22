@@ -9,9 +9,8 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * The current state of an asynchronous import, as polled via GET /api/imports/{import}.
  *
- * Fields are listed explicitly rather than spread from `parent::toArray()`: the moment
- * serializer in AppServiceProvider applies to Carbon attributes returned as-is, not to
- * the strings `Model::toArray()` produces. Expects the `supplier` relation to be loaded.
+ * Fields are listed explicitly: the moment serializer in AppServiceProvider skips the
+ * strings `parent::toArray()` produces. Expects the `supplier` relation to be loaded.
  *
  * @mixin Import
  */

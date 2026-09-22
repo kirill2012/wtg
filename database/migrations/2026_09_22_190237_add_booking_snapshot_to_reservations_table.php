@@ -10,9 +10,8 @@ return new class extends Migration
     /**
      * A snapshot of the offer at booking time: a later import may move or reschedule it.
      *
-     * Added nullable, filled from the offers and only then made required, so that the
-     * migration also runs on a table that already holds reservations. Those get the offer
-     * as it stands now — the best that can be recovered after the fact.
+     * Added nullable, backfilled from the offers' current state, then made required, so it
+     * also runs on a table that already holds reservations.
      */
     public function up(): void
     {

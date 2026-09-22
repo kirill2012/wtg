@@ -15,9 +15,8 @@ class Offer extends Model
     use HasFactory;
 
     /**
-     * `reserved_units` is deliberately absent: it belongs to the application, and the
-     * booking flow moves it with `increment()`. Keeping it out of mass assignment means an
-     * import that tries to write it fails loudly instead of overwriting reservations.
+     * `reserved_units` is left out: only reservations move it, and an import trying to
+     * write it fails loudly instead of overwriting them.
      *
      * @var list<string>
      */
@@ -37,8 +36,7 @@ class Offer extends Model
     ];
 
     /**
-     * Mirrors the database default so `free_units` works on an offer that has not been
-     * persisted (or refreshed) yet.
+     * Mirrors the database default so `free_units` works before a save or refresh.
      *
      * @var array<string, mixed>
      */
@@ -84,12 +82,8 @@ class Offer extends Model
     }
 
     /**
-     * Units still open for booking: what the supplier published minus what the
-     * application has reserved, never below zero (a supplier may lower `available_units`
-     * under the reserved count; existing reservations stay).
-     *
-     * Deliberately not named `available_units`: an accessor by that name would shadow the
-     * raw column the booking logic reads under the row lock.
+     * Units still bookable, never below zero: a supplier may lower `available_units` under
+     * the reserved count. Not named `available_units`, which would shadow the raw column.
      */
     protected function freeUnits(): Attribute
     {

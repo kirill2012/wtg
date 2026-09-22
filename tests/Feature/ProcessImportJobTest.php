@@ -358,9 +358,8 @@ class ProcessImportJobTest extends TestCase
 
     public function test_the_job_holding_the_import_takes_it_over_again(): void
     {
-        // A retry, or `queue:retry` of a job whose `failed()` never got written: the same
-        // uuid. Nothing about the row changes, time included, so the UPDATE matches the row
-        // and changes none of it — the claim must not mistake that for losing.
+        // A retry: the same uuid and identical values, so the UPDATE changes no row — the
+        // claim must not mistake that for losing.
         $this->freezeSecond();
         $import = $this->import([$this->offer()], ['status' => ImportStatus::Processing, 'claimed_by' => self::OWNER]);
 

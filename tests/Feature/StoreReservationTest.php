@@ -159,9 +159,8 @@ class StoreReservationTest extends TestCase
 
     public function test_a_conflict_keeps_its_documented_shape_with_debug_on(): void
     {
-        // The suite runs with APP_DEBUG off, where the default handler is already terse, but
-        // the documented installation runs with it on — and there Laravel attaches the
-        // exception, the file and the whole trace to a 409 unless the renderer intervenes.
+        // The suite runs with APP_DEBUG off, but the documented install has it on, where
+        // Laravel would attach the trace to a 409.
         config(['app.debug' => true]);
         $offer = Offer::factory()->expired()->create();
 

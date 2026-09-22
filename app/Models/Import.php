@@ -31,8 +31,7 @@ class Import extends Model
     ];
 
     /**
-     * Mirrors the database defaults: a freshly created import must report its status
-     * and counter without a round trip to the database.
+     * Mirrors the database defaults, so a freshly created import reports them without a refresh.
      *
      * @var array<string, mixed>
      */

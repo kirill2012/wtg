@@ -9,8 +9,8 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * The body of POST /api/offers/{offer}/reservations: the reservation, flat.
  *
- * What is returned is the snapshot the reservation holds, not the offer's current state:
- * the offer may have been re-imported since. Expects the `property` relation to be loaded.
+ * Returns the reservation's snapshot, not the offer's current state. Expects the
+ * `property` relation to be loaded.
  *
  * @mixin Reservation
  */

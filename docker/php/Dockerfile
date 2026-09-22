@@ -55,7 +55,7 @@ RUN groupmod -o -g "${GID}" www-data \
     && usermod -o -u "${UID}" -g "${GID}" www-data \
     && chown -R www-data:www-data /var/www
 
-# Xdebug, from the pinned GitHub tag for the same reason as phpredis above.
+# Xdebug, built from a pinned GitHub tag.
 ARG XDEBUG_VERSION=3.5.3
 RUN set -eux; \
     curl -fsSL "https://github.com/xdebug/xdebug/archive/refs/tags/${XDEBUG_VERSION}.tar.gz" -o /tmp/xdebug.tar.gz; \
