@@ -160,9 +160,11 @@ while a wider index would cost every import write.
 
 The HTTP request validates, stores and queues; nothing else. `ProcessImportJob` reads the
 offers from `imports.payload`, sorts them by `external_id` and applies them in batches of
-100 (`ImportProcessor::OFFERS_PER_TRANSACTION`), one transaction per batch. The sort gives two
-jobs writing the same offers one lock order, so they wait on each other instead of
-deadlocking. For each offer:
+100 (`ImportProcessor::OFFERS_PER_TRANSACTION`), one transaction per batch. The sort gives
+two jobs updating the same offers one lock order, so they mostly wait on each other. A
+deadlock is still possible — between inserts, or with a booking when an import moves an
+offer and recounts its reservations — and MySQL resolves it by rolling one side back:
+the batch and the booking both retry up to three times. For each offer:
 
 1. the property is found or created by `code` — before the batch's transaction, because
    under `REPEATABLE READ` its snapshot would hide a property another worker has just

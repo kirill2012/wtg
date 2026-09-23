@@ -96,8 +96,9 @@ class ImportProcessor
     }
 
     /**
-     * Sorted by external_id, so two jobs writing the same offers lock them in the same order
-     * instead of deadlocking on each other's batches.
+     * Sorted by external_id, so two jobs updating the same offers lock them in the same order.
+     * That makes deadlocks rare, not impossible: inserts take gap locks, and a recount can
+     * meet a booking of another offer in the batch. The batch retries on one.
      *
      * @param  list<array<string, mixed>>  $offers
      * @return list<array<string, mixed>>
