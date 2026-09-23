@@ -127,6 +127,18 @@ class StoreImportTest extends TestCase
         ];
     }
 
+    public function test_ids_that_are_only_numerically_equal_are_different_content(): void
+    {
+        Bus::fake();
+        $this->postJson(route('imports.store'), array_replace_recursive($this->payload(), ['offers' => [['external_id' => '1000']]]))
+            ->assertAccepted();
+
+        $this->postJson(route('imports.store'), array_replace_recursive($this->payload(), ['offers' => [['external_id' => '1e3']]]))
+            ->assertConflict();
+
+        Bus::assertDispatchedTimes(ProcessImportJob::class, 1);
+    }
+
     public function test_losing_the_insert_race_returns_the_winner_without_a_second_dispatch(): void
     {
         Bus::fake();

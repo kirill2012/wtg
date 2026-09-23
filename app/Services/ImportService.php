@@ -96,20 +96,34 @@ class ImportService
     }
 
     /**
-     * `==`, not `===`: the JSON column does not keep the key order of the request.
-     *
      * @param  array{sent_at: string, offers: list<array<string, mixed>>}  $data
      */
     private function sameImportOrConflict(Import $import, array $data): Import
     {
         $hasSameContent = $import->sent_at->equalTo(Carbon::parse($data['sent_at']))
-            && $import->payload == $data['offers'];
+            && $this->withSortedKeys($import->payload) === $this->withSortedKeys($data['offers']);
 
         if (! $hasSameContent) {
             abort(Response::HTTP_CONFLICT, 'This external_import_id was already used with different content.');
         }
 
         return $import;
+    }
+
+    /**
+     * The JSON column does not keep the request's key order, so `===` needs the keys sorted;
+     * `==` would take `"1000"` and `"1e3"` for the same id. List order is kept.
+     *
+     * @param  array<array-key, mixed>  $value
+     * @return array<array-key, mixed>
+     */
+    private function withSortedKeys(array $value): array
+    {
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map(fn (mixed $item): mixed => is_array($item) ? $this->withSortedKeys($item) : $item, $value);
     }
 
     /**
