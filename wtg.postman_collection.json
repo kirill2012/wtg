@@ -249,7 +249,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('answers 200, not 202 — nothing was queued', () => pm.response.to.have.status(200));",
+                  "pm.test('answers 202, as the first time', () => pm.response.to.have.status(202));",
                   "",
                   "const resent = pm.response.json().data;",
                   "pm.test('returns the existing import, not a new one', () => {",
@@ -294,7 +294,7 @@
                 "imports"
               ]
             },
-            "description": "The same body again. supplier + external_import_id identifies an import, so the existing row comes back with 200 and its current status — no duplicate, no second run of the job."
+            "description": "The same body again. supplier + external_import_id identifies an import, so the existing row comes back with 202 and its current status — no duplicate, no second run of the job."
           }
         },
         {

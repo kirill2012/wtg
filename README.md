@@ -14,9 +14,8 @@ details are in the sections linked.
 
 | The task says | The API does | Why |
 |---|---|---|
-| `POST /api/imports` answers `202` | a resend of an import already recorded answers `200` with the existing row and its current status, and queues nothing | the import was accepted by the earlier request; a second `202` would claim a new one ([API](#post-apiimports--accept-an-import)) |
 | `supplier + external_import_id` is unique | the same `external_import_id` with a different `sent_at` or different offers answers `409` | the supplier reused an id; silently keeping either version would lose data |
-| an offer that exists in another import is updated | it is updated only when the new import's `sent_at` is not older than the one that last wrote it | a stale import processed late must not overwrite newer data ([Import processing](#import-processing)) |
+| an offer that exists in another import is updated | it is updated only when the new import's `sent_at` is later than that of the one that last wrote it, or equal and the new import was recorded later | a stale import processed late must not overwrite newer data ([Import processing](#import-processing)) |
 | the response contains `next`, `prev`, `per_page` | they are in Laravel's paginator envelope: `links.next`, `links.prev`, `meta.per_page` | the standard shape of an API Resource collection, followed by any Laravel client |
 | after an error the import is `failed` | it is `failed`, and the batches of 100 offers committed before the error stay | a batch is one transaction, short enough that bookings barely wait on its locks; a retry finishes the rest |
 | `completed_at` | also set for a `failed` import, as the moment processing ended | one field for "finished", whatever the outcome |
@@ -104,7 +103,7 @@ the structure and the supplier, stores the import together with its payload, que
 `Location` header pointing at the status endpoint.
 
 `supplier + external_import_id` identifies an import. Resending it with the same content
-answers `200` with the existing row and its *current* status (`completed` a minute later,
+answers `202` too, with the existing row and its *current* status (`completed` a minute later,
 not `pending`) and queues nothing. Resending it with a different `sent_at` or different
 offers answers `409`: the supplier has reused an id, and neither version is silently
 dropped.

@@ -59,7 +59,7 @@ class StoreImportTest extends TestCase
 
         $second = $this->postJson(route('imports.store'), $this->payload());
 
-        $second->assertOk()->assertJsonPath('data.id', $first->json('data.id'));
+        $second->assertAccepted()->assertJsonPath('data.id', $first->json('data.id'));
         $this->assertDatabaseCount('imports', 1);
         Bus::assertDispatchedTimes(ProcessImportJob::class, 1);
     }
@@ -72,7 +72,7 @@ class StoreImportTest extends TestCase
         $response = $this->postJson(route('imports.store'), $this->payload());
 
         $response
-            ->assertOk()
+            ->assertAccepted()
             ->assertExactJson(['data' => ['id' => $existing->id, 'status' => 'completed']]);
         $this->assertDatabaseCount('imports', 1);
         Bus::assertNotDispatched(ProcessImportJob::class);
@@ -86,7 +86,7 @@ class StoreImportTest extends TestCase
         $resent = $this->payload(['sent_at' => '2026-09-01T12:00:00+02:00']);
         $resent['offers'][0] = array_reverse($resent['offers'][0], preserve_keys: true);
 
-        $this->postJson(route('imports.store'), $resent)->assertOk();
+        $this->postJson(route('imports.store'), $resent)->assertAccepted();
 
         $this->assertDatabaseCount('imports', 1);
         Bus::assertDispatchedTimes(ProcessImportJob::class, 1);
@@ -158,7 +158,7 @@ class StoreImportTest extends TestCase
         $response = $this->postJson(route('imports.store'), $this->payload());
 
         $this->assertTrue($raced);
-        $response->assertOk()->assertJsonPath('data.status', 'completed');
+        $response->assertAccepted()->assertJsonPath('data.status', 'completed');
         $this->assertDatabaseCount('imports', 1);
         Bus::assertNotDispatched(ProcessImportJob::class);
     }

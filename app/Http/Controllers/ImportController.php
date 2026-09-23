@@ -16,10 +16,10 @@ class ImportController extends Controller
     {
         $import = $importService->accept($request->validated());
 
-        // A resend queues nothing, so it gets the existing import with 200 rather than 202.
+        // A resend is accepted too: it gets the existing import, in its current status.
         return ImportAcceptedResource::make($import)
             ->response()
-            ->setStatusCode($import->wasRecentlyCreated ? Response::HTTP_ACCEPTED : Response::HTTP_OK)
+            ->setStatusCode(Response::HTTP_ACCEPTED)
             ->header('Location', route('imports.show', $import));
     }
 
