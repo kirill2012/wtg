@@ -6,7 +6,6 @@ use App\Models\Offer;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\Query\JoinClause;
-use Illuminate\Support\Facades\DB;
 
 class PropertySearchService
 {
@@ -43,13 +42,13 @@ class PropertySearchService
      */
     private function rankedLiveOffers(array $filters): Builder
     {
-        $query = DB::table('offers')
+        $query = Offer::query()
             ->selectRaw('offers.id, ROW_NUMBER() OVER (PARTITION BY offers.property_id ORDER BY offers.price ASC, offers.id ASC) AS rn')
             ->where('offers.check_in', '=', $filters['check_in'])
             ->where('offers.check_out', '=', $filters['check_out'])
             ->where('offers.max_guests', '>=', (int) ($filters['guests'] ?? self::DEFAULT_GUESTS))
-            ->whereColumn('offers.available_units', '>', 'offers.reserved_units')
-            ->where('offers.expires_at', '>', now());
+            ->bookable()
+            ->toBase();
 
         if (($filters['city'] ?? null) !== null) {
             $query

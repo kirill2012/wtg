@@ -33,11 +33,11 @@ class ReservationService
                 return $this->sameOfferOrConflict($existing, $locked);
             }
 
-            if ($locked->expires_at->lessThanOrEqualTo(now())) {
+            if ($locked->isExpired()) {
                 throw OfferUnavailableException::expired();
             }
 
-            if ($locked->free_units < 1) {
+            if ($locked->isSoldOut()) {
                 throw OfferUnavailableException::soldOut();
             }
 

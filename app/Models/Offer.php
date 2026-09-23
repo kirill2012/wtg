@@ -3,6 +3,8 @@
 namespace App\Models;
 
 use Database\Factories\OfferFactory;
+use Illuminate\Database\Eloquent\Attributes\Scope;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -83,6 +85,33 @@ class Offer extends Model
     public function reservations(): HasMany
     {
         return $this->hasMany(Reservation::class);
+    }
+
+    /**
+     * Offers that can still be booked: not expired and with a unit left. The SQL form of
+     * `! isExpired() && ! isSoldOut()`; the two must change together.
+     *
+     * @param  Builder<self>  $query
+     */
+    #[Scope]
+    protected function bookable(Builder $query): void
+    {
+        $query
+            ->where($query->qualifyColumn('expires_at'), '>', now())
+            ->whereColumn($query->qualifyColumn('available_units'), '>', $query->qualifyColumn('reserved_units'));
+    }
+
+    /**
+     * Closed from the second it expires.
+     */
+    public function isExpired(): bool
+    {
+        return $this->expires_at->lessThanOrEqualTo(now());
+    }
+
+    public function isSoldOut(): bool
+    {
+        return $this->free_units < 1;
     }
 
     /**
