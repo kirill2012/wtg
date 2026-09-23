@@ -13,19 +13,16 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\Response;
 
 class ImportService
 {
     /**
-     * Record an import and queue its processing, atomically.
+     * Record an import and queue its processing in one transaction: the job goes to the
+     * `database` queue on the same connection, so both rows commit together.
      *
-     * The queue is the `database` driver on the same connection, so the import and its job
-     * row commit together or not at all. `after_commit` must stay off.
-     *
-     * A resent (supplier, external_import_id) returns the existing import and queues
-     * nothing, even if the payload differs. A race is settled by the unique key; the
-     * winner's row is re-read outside the transaction, whose snapshot would not show it.
+     * A resent import returns the existing row and queues nothing; a resend with different
+     * content is a 409.
      *
      * @param  array{supplier: string, external_import_id: string, sent_at: string, offers: list<array<string, mixed>>}  $data
      */
@@ -41,7 +38,7 @@ class ImportService
         $existing = Import::query()->where($keys)->first();
 
         if ($existing !== null) {
-            return $existing;
+            return $this->sameImportOrConflict($existing, $data);
         }
 
         try {
@@ -60,16 +57,16 @@ class ImportService
                 return $import;
             });
         } catch (UniqueConstraintViolationException) {
-            return Import::query()->where($keys)->firstOrFail();
+            // A concurrent request recorded it first; read outside the rolled-back transaction.
+            return $this->sameImportOrConflict(Import::query()->where($keys)->firstOrFail(), $data);
         }
     }
 
     /**
-     * Apply every offer of the payload, each in its own transaction, once the job has
-     * claimed the import. A failure part-way keeps the offers already written; a re-run
-     * catches up the rest, because `applyOffer()` is idempotent.
+     * Apply the payload offer by offer, each in its own transaction, once the job has
+     * claimed the import. A re-run after a failure is safe: `applyOffer()` is idempotent.
      *
-     * @param  string  $claimant  the uuid of the queued job, the same on every attempt
+     * @param  string  $claimant  the queued job's uuid, the same on every attempt
      */
     public function process(Import $import, string $claimant): void
     {
@@ -83,12 +80,10 @@ class ImportService
         }
 
         foreach ($import->payload as $offerData) {
-            // Outside the offer's transaction: under REPEATABLE READ, a worker losing the
-            // insert race on a new code would not see the winner's row when firstOrCreate
-            // re-reads it. A property left without offers is harmless.
+            // Outside the transaction, so a property another worker has just committed is visible.
             $property = $this->findOrCreateProperty($offerData['property']);
 
-            // Concurrent inserts on the unique index can deadlock; replaying is safe.
+            // Retried on a deadlock between concurrent inserts.
             DB::transaction(fn () => $this->applyOffer($import, $property, $offerData), attempts: 3);
 
             $import->increment('processed_offers');
@@ -101,12 +96,27 @@ class ImportService
     }
 
     /**
-     * Move the import to `processing` in one conditional UPDATE, so only one job runs it.
-     * Claimable: `pending`, `failed` (recovery), and `processing` held by the same uuid
-     * (retries and `queue:retry`).
+     * `==`, not `===`: the JSON column does not keep the key order of the request.
      *
-     * Success is read back, not taken from the affected-row count: MySQL counts changed
-     * rows, and a retry rewriting identical values changes none.
+     * @param  array{sent_at: string, offers: list<array<string, mixed>>}  $data
+     */
+    private function sameImportOrConflict(Import $import, array $data): Import
+    {
+        $hasSameContent = $import->sent_at->equalTo(Carbon::parse($data['sent_at']))
+            && $import->payload == $data['offers'];
+
+        if (! $hasSameContent) {
+            abort(Response::HTTP_CONFLICT, 'This external_import_id was already used with different content.');
+        }
+
+        return $import;
+    }
+
+    /**
+     * Move the import to `processing` with one conditional UPDATE, so only one job runs it:
+     * from `pending`, `failed`, or `processing` held by the same job (a retry).
+     *
+     * The result is read back: MySQL reports changed rows, and a retry changes none.
      */
     private function claim(Import $import, string $claimant): bool
     {
@@ -132,8 +142,7 @@ class ImportService
     }
 
     /**
-     * Find-or-create only: two suppliers may describe one property differently, and
-     * last-writer-wins would make its name flicker from import to import.
+     * Never updated: two suppliers may describe one property differently.
      *
      * @param  array{code: string, name: string, City: string}  $data
      */
@@ -155,7 +164,7 @@ class ImportService
             'external_id' => $data['external_id'],
         ];
 
-        // `reserved_units` is absent on purpose: imports never touch it.
+        // No `reserved_units`: reservations own it, bar the recount below.
         $values = [
             'property_id' => $property->id,
             'import_id' => $import->id,
@@ -164,42 +173,43 @@ class ImportService
             'check_out' => $data['check_out'],
             'max_guests' => $data['max_guests'],
             'price' => $data['price'],
-            'currency' => Str::upper($data['currency']),
+            'currency' => $data['currency'],
             'available_units' => $data['available_units'],
             'expires_at' => Carbon::parse($data['expires_at'])->utc(),
         ];
 
-        // A plain lookup, not a locking one: locking a missing key gap-locks its range,
-        // and two workers inserting different new offers would deadlock.
+        // A plain lookup: a locking read of a missing key would gap-lock and deadlock inserts.
         if (Offer::query()->where($keys)->doesntExist()) {
             try {
                 Offer::query()->create(array_merge($keys, $values));
 
                 return;
             } catch (UniqueConstraintViolationException) {
-                // Another worker inserted it meanwhile. Only the locking read below sees
-                // that row past our snapshot; createOrFirst falls back to a plain read.
+                // Inserted by another worker meanwhile; the locking read below sees it.
             }
         }
 
-        // The row lock makes the staleness check reliable: without it two workers could
-        // both read the old sent_at and the staler import could commit last.
-        $offer = $this->lockedOffer($keys)->firstOrFail();
+        // Locked, so a staler import cannot commit over a newer one.
+        $offer = Offer::query()->where($keys)->lockForUpdate()->firstOrFail();
 
-        // The newer sent_at wins, whatever the processing order. A skip counts as processed.
+        // The newer sent_at wins; a skipped offer still counts as processed.
         if ($offer->sent_at->greaterThan($import->sent_at)) {
             return;
         }
 
-        $offer->update($values);
-    }
+        $offer->fill($values);
 
-    /**
-     * @param  array{supplier_id: int, external_id: string}  $keys
-     * @return Builder<Offer>
-     */
-    private function lockedOffer(array $keys): Builder
-    {
-        return Offer::query()->where($keys)->lockForUpdate();
+        // Units booked for another stay do not hold this one. A locking read: reservations
+        // committed after this transaction's snapshot must be counted.
+        if ($offer->isDirty(['property_id', 'check_in', 'check_out'])) {
+            $offer->reserved_units = $offer->reservations()
+                ->where('property_id', $offer->property_id)
+                ->where('check_in', $data['check_in'])
+                ->where('check_out', $data['check_out'])
+                ->sharedLock()
+                ->count();
+        }
+
+        $offer->save();
     }
 }

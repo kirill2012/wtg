@@ -242,14 +242,14 @@
           }
         },
         {
-          "name": "POST /api/imports — resending changes nothing",
+          "name": "POST /api/imports — resending the same import changes nothing",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('answers 202 again', () => pm.response.to.have.status(202));",
+                  "pm.test('answers 200, not 202 — nothing was queued', () => pm.response.to.have.status(200));",
                   "",
                   "const resent = pm.response.json().data;",
                   "pm.test('returns the existing import, not a new one', () => {",
@@ -258,6 +258,57 @@
                   "",
                   "pm.test('reports its current status, not pending', () => {",
                   "    pm.expect(resent.status).to.eql('completed');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"supplier\": \"supplier-a\",\n  \"external_import_id\": \"{{externalImportId}}\",\n  \"sent_at\": \"{{sentAt}}\",\n  \"offers\": [\n    {\n      \"external_id\": \"{{externalIdA}}\",\n      \"property\": {\n        \"code\": \"{{propertyCode}}\",\n        \"name\": \"Apartment near Sagrada Familia\",\n        \"City\": \"Barcelona\"\n      },\n      \"check_in\": \"{{checkIn}}\",\n      \"check_out\": \"{{checkOut}}\",\n      \"max_guests\": 4,\n      \"price\": 72500,\n      \"currency\": \"EUR\",\n      \"available_units\": 2,\n      \"expires_at\": \"{{expiresAt}}\"\n    },\n    {\n      \"external_id\": \"{{externalIdB}}\",\n      \"property\": {\n        \"code\": \"{{propertyCode}}\",\n        \"name\": \"Apartment near Sagrada Familia\",\n        \"City\": \"Barcelona\"\n      },\n      \"check_in\": \"{{checkIn}}\",\n      \"check_out\": \"{{checkOut}}\",\n      \"max_guests\": 4,\n      \"price\": 69000,\n      \"currency\": \"EUR\",\n      \"available_units\": 1,\n      \"expires_at\": \"{{expiresAt}}\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/imports",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "imports"
+              ]
+            },
+            "description": "The same body again. supplier + external_import_id identifies an import, so the existing row comes back with 200 and its current status — no duplicate, no second run of the job."
+          }
+        },
+        {
+          "name": "POST /api/imports — 409 on the same id with different content",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('answers 409 Conflict', () => pm.response.to.have.status(409));",
+                  "",
+                  "pm.test('explains the conflict', () => {",
+                  "    pm.expect(pm.response.json()).to.eql({ message: 'This external_import_id was already used with different content.' });",
                   "});"
                 ]
               }
@@ -294,7 +345,7 @@
                 "imports"
               ]
             },
-            "description": "The same supplier + external_import_id with a deliberately different payload. The pair identifies an import, so the existing row comes back with its current status and the new payload is ignored — no duplicate, no second run of the job."
+            "description": "The same supplier + external_import_id with a deliberately different payload. The supplier has reused an id, so neither version is silently dropped: 409, and the recorded import stays as it was."
           }
         },
         {

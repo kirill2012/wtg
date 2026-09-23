@@ -15,8 +15,12 @@ class Offer extends Model
     use HasFactory;
 
     /**
-     * `reserved_units` is left out: only reservations move it, and an import trying to
-     * write it fails loudly instead of overwriting them.
+     * The one currency every price is in: search compares raw minor units, no conversion.
+     */
+    public const string CURRENCY = 'EUR';
+
+    /**
+     * No `reserved_units`: reservations write it, and an import only recounts it.
      *
      * @var list<string>
      */
@@ -36,7 +40,7 @@ class Offer extends Model
     ];
 
     /**
-     * Mirrors the database default so `free_units` works before a save or refresh.
+     * Mirrors the database default.
      *
      * @var array<string, mixed>
      */
@@ -82,8 +86,7 @@ class Offer extends Model
     }
 
     /**
-     * Units still bookable, never below zero: a supplier may lower `available_units` under
-     * the reserved count. Not named `available_units`, which would shadow the raw column.
+     * Units still bookable, never below zero.
      */
     protected function freeUnits(): Attribute
     {

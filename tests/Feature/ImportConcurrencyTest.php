@@ -101,7 +101,8 @@ class ImportConcurrencyTest extends TestCase
 
         // Parents of the other worker's row, committed up front: an uncommitted parent would
         // make its insert wait on the foreign key check, which is not the lock under test.
-        $property = Property::factory()->create();
+        // The same property and stay as our payload, so reserved_units is kept, not recounted.
+        $property = Property::factory()->create(['code' => 'BCN-0001']);
         $otherImport = Import::factory()->for($supplier)->create();
 
         $other = DB::connection('mysql_secondary');
@@ -160,7 +161,8 @@ class ImportConcurrencyTest extends TestCase
         ]);
 
         // Committed up front, or the other worker's insert would wait on the foreign key.
-        $property = Property::factory()->create();
+        // The same property and stay as our payload, so reserved_units is kept, not recounted.
+        $property = Property::factory()->create(['code' => 'BCN-0001']);
         $otherImport = Import::factory()->for($supplier)->create(['sent_at' => '2026-09-01 09:00:00']);
 
         // Plays the other worker: it commits our offer right after the plain lookup came back
@@ -179,8 +181,8 @@ class ImportConcurrencyTest extends TestCase
                 'import_id' => $otherImport->id,
                 'external_id' => 'offer-a-10001',
                 'sent_at' => $otherImport->sent_at,
-                'check_in' => '2026-10-01',
-                'check_out' => '2026-10-05',
+                'check_in' => '2026-10-10',
+                'check_out' => '2026-10-15',
                 'max_guests' => 2,
                 'price' => 61000,
                 'currency' => 'EUR',
@@ -198,12 +200,11 @@ class ImportConcurrencyTest extends TestCase
         $this->assertSame(ImportStatus::Completed, $import->fresh()->status);
         $this->assertDatabaseCount('offers', 1);
 
-        // Our payload won, and reserved_units survived: an import never writes it.
+        // Our payload won, and reserved_units survived: the stay did not change.
         $offer = Offer::query()->sole();
         $this->assertSame(72500, $offer->price);
-        $this->assertSame('2026-10-10', $offer->check_in->toDateString());
+        $this->assertSame(4, $offer->max_guests);
         $this->assertTrue($offer->import->is($import));
-        $this->assertSame('BCN-0001', $offer->property->code);
         $this->assertSame(1, $offer->reserved_units);
     }
 

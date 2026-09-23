@@ -17,7 +17,7 @@ return new class extends Migration
             $table->string('external_import_id');
             $table->dateTime('sent_at')->comment('When the supplier generated the import (UTC)');
             $table->string('status', 16)->default('pending');
-            $table->json('payload')->comment('The offers array exactly as the supplier sent it; the job reads from here');
+            $table->json('payload')->comment('The offers array as validated from the request; the job reads from here');
             $table->unsignedInteger('total_offers');
             $table->unsignedInteger('processed_offers')->default(0);
             $table->text('error')->nullable();

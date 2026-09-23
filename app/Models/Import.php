@@ -31,7 +31,7 @@ class Import extends Model
     ];
 
     /**
-     * Mirrors the database defaults, so a freshly created import reports them without a refresh.
+     * Mirrors the database defaults.
      *
      * @var array<string, mixed>
      */
@@ -60,6 +60,10 @@ class Import extends Model
         return $this->belongsTo(Supplier::class);
     }
 
+    /**
+     * The offers this import wrote last: a later import that updates an offer takes it over,
+     * so this is not every offer the payload carried.
+     */
     public function offers(): HasMany
     {
         return $this->hasMany(Offer::class);

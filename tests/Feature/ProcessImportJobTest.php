@@ -155,13 +155,6 @@ class ProcessImportJobTest extends TestCase
         $this->assertDatabaseHas('offers', ['expires_at' => '2026-09-10 23:59:59']);
     }
 
-    public function test_the_currency_is_stored_in_upper_case(): void
-    {
-        ProcessImportJob::dispatchSync($this->import([$this->offer(['currency' => 'eur'])]));
-
-        $this->assertDatabaseHas('offers', ['currency' => 'EUR']);
-    }
-
     public function test_an_existing_property_is_not_rewritten(): void
     {
         Property::factory()->create(['code' => 'BCN-0001', 'name' => 'Original name', 'city' => 'Girona']);
@@ -207,6 +200,9 @@ class ProcessImportJobTest extends TestCase
     {
         $offer = Offer::factory()->for($this->supplier)->create([
             'external_id' => 'offer-a-10001',
+            'property_id' => Property::factory()->create(['code' => 'BCN-0001']),
+            'check_in' => '2026-10-10',
+            'check_out' => '2026-10-15',
             'available_units' => 2,
             'reserved_units' => 2,
             'sent_at' => '2026-09-01 09:00:00',
@@ -218,6 +214,49 @@ class ProcessImportJobTest extends TestCase
         $this->assertSame(5, $offer->available_units);
         $this->assertSame(2, $offer->reserved_units);
         $this->assertSame(3, $offer->free_units);
+    }
+
+    public function test_moving_an_offer_to_other_dates_releases_the_units_booked_for_the_old_ones(): void
+    {
+        ProcessImportJob::dispatchSync($this->import([$this->offer()], ['sent_at' => '2026-09-01 09:00:00']));
+        $offer = Offer::query()->sole();
+        $this->reserveEveryUnit($offer);
+
+        ProcessImportJob::dispatchSync($this->import([
+            $this->offer(['check_in' => '2026-11-01', 'check_out' => '2026-11-05']),
+        ]));
+
+        $offer->refresh();
+        $this->assertSame(0, $offer->reserved_units);
+        $this->assertSame(2, $offer->free_units);
+    }
+
+    public function test_moving_an_offer_to_another_property_releases_the_units_booked_for_the_old_one(): void
+    {
+        ProcessImportJob::dispatchSync($this->import([$this->offer()], ['sent_at' => '2026-09-01 09:00:00']));
+        $offer = Offer::query()->sole();
+        $this->reserveEveryUnit($offer);
+
+        ProcessImportJob::dispatchSync($this->import([
+            $this->offer(['property' => ['code' => 'MAD-0007', 'name' => 'Flat in Malasaña', 'City' => 'Madrid']]),
+        ]));
+
+        $this->assertSame(0, $offer->refresh()->reserved_units);
+    }
+
+    public function test_moving_an_offer_back_counts_the_reservations_of_that_stay_again(): void
+    {
+        ProcessImportJob::dispatchSync($this->import([$this->offer()], ['sent_at' => '2026-09-01 08:00:00']));
+        $offer = Offer::query()->sole();
+        $this->reserveEveryUnit($offer);
+
+        ProcessImportJob::dispatchSync($this->import(
+            [$this->offer(['check_in' => '2026-11-01', 'check_out' => '2026-11-05'])],
+            ['sent_at' => '2026-09-01 09:00:00'],
+        ));
+        ProcessImportJob::dispatchSync($this->import([$this->offer()]));
+
+        $this->assertSame(2, $offer->refresh()->reserved_units);
     }
 
     public function test_a_reservation_keeps_the_property_and_the_stay_it_was_booked_for(): void
@@ -457,6 +496,15 @@ class ProcessImportJobTest extends TestCase
         });
 
         return $job;
+    }
+
+    /**
+     * Book every unit the way ReservationService does: one reservation each, counted on the offer.
+     */
+    private function reserveEveryUnit(Offer $offer): void
+    {
+        Reservation::factory()->for($offer)->count($offer->available_units)->create();
+        Offer::query()->whereKey($offer->getKey())->increment('reserved_units', $offer->available_units);
     }
 
     /**

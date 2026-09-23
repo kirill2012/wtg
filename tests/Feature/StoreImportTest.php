@@ -59,7 +59,7 @@ class StoreImportTest extends TestCase
 
         $second = $this->postJson(route('imports.store'), $this->payload());
 
-        $second->assertAccepted()->assertJsonPath('data.id', $first->json('data.id'));
+        $second->assertOk()->assertJsonPath('data.id', $first->json('data.id'));
         $this->assertDatabaseCount('imports', 1);
         Bus::assertDispatchedTimes(ProcessImportJob::class, 1);
     }
@@ -67,30 +67,43 @@ class StoreImportTest extends TestCase
     public function test_resending_reports_the_current_state_of_the_existing_import(): void
     {
         Bus::fake();
-        $existing = Import::factory()
-            ->for(Supplier::query()->where('slug', 'supplier-a')->sole())
-            ->completed(20)
-            ->create(['external_import_id' => 'import-2026-09-01-001']);
+        $existing = $this->recordedImport();
 
         $response = $this->postJson(route('imports.store'), $this->payload());
 
         $response
-            ->assertAccepted()
+            ->assertOk()
             ->assertExactJson(['data' => ['id' => $existing->id, 'status' => 'completed']]);
         $this->assertDatabaseCount('imports', 1);
         Bus::assertNotDispatched(ProcessImportJob::class);
     }
 
-    public function test_a_different_payload_under_the_same_import_id_is_ignored(): void
+    public function test_the_same_content_with_reordered_keys_and_another_offset_is_a_resend(): void
     {
         Bus::fake();
-        $this->postJson(route('imports.store'), $this->payload());
+        $this->postJson(route('imports.store'), $this->payload())->assertAccepted();
 
-        $changed = $this->payload();
-        $changed['offers'][0]['price'] = 1;
-        $changed['offers'][] = array_replace($changed['offers'][0], ['external_id' => 'offer-a-10002']);
+        $resent = $this->payload(['sent_at' => '2026-09-01T12:00:00+02:00']);
+        $resent['offers'][0] = array_reverse($resent['offers'][0], preserve_keys: true);
 
-        $this->postJson(route('imports.store'), $changed)->assertAccepted();
+        $this->postJson(route('imports.store'), $resent)->assertOk();
+
+        $this->assertDatabaseCount('imports', 1);
+        Bus::assertDispatchedTimes(ProcessImportJob::class, 1);
+    }
+
+    /**
+     * @param  callable(array<string, mixed>): array<string, mixed>  $change
+     */
+    #[DataProvider('changedContent')]
+    public function test_different_content_under_the_same_import_id_is_a_conflict(callable $change): void
+    {
+        Bus::fake();
+        $this->postJson(route('imports.store'), $this->payload())->assertAccepted();
+
+        $this->postJson(route('imports.store'), $change($this->payload()))
+            ->assertConflict()
+            ->assertExactJson(['message' => 'This external_import_id was already used with different content.']);
 
         $import = Import::query()->sole();
         $this->assertSame(1, $import->total_offers);
@@ -98,27 +111,42 @@ class StoreImportTest extends TestCase
         Bus::assertDispatchedTimes(ProcessImportJob::class, 1);
     }
 
+    /**
+     * @return array<string, array{callable(array<string, mixed>): array<string, mixed>}>
+     */
+    public static function changedContent(): array
+    {
+        return [
+            'a changed offer' => [fn (array $payload): array => array_replace_recursive($payload, ['offers' => [['price' => 1]]])],
+            'an added offer' => [function (array $payload): array {
+                $payload['offers'][] = array_replace($payload['offers'][0], ['external_id' => 'offer-a-10002']);
+
+                return $payload;
+            }],
+            'another sent_at' => [fn (array $payload): array => array_replace($payload, ['sent_at' => '2026-09-01T11:00:00Z'])],
+        ];
+    }
+
     public function test_losing_the_insert_race_returns_the_winner_without_a_second_dispatch(): void
     {
         Bus::fake();
-        $supplier = Supplier::query()->where('slug', 'supplier-a')->sole();
 
         // Plays the other worker: the row appears after the service's lookup and before
         // its insert, so the insert hits the unique key and the service re-reads.
         $raced = false;
-        DB::listen(function (QueryExecuted $query) use (&$raced, $supplier): void {
+        DB::listen(function (QueryExecuted $query) use (&$raced): void {
             if ($raced || ! str_starts_with($query->sql, 'select') || ! str_contains($query->sql, '`imports`')) {
                 return;
             }
 
             $raced = true;
-            Import::factory()->for($supplier)->completed(20)->create(['external_import_id' => 'import-2026-09-01-001']);
+            $this->recordedImport();
         });
 
         $response = $this->postJson(route('imports.store'), $this->payload());
 
         $this->assertTrue($raced);
-        $response->assertAccepted()->assertJsonPath('data.status', 'completed');
+        $response->assertOk()->assertJsonPath('data.status', 'completed');
         $this->assertDatabaseCount('imports', 1);
         Bus::assertNotDispatched(ProcessImportJob::class);
     }
@@ -197,6 +225,54 @@ class StoreImportTest extends TestCase
         $this->postJson(route('imports.store'), ['supplier' => 'supplier-a', 'offers' => 'not-a-list'])
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['external_import_id', 'sent_at', 'offers']);
+    }
+
+    #[DataProvider('invalidMoments')]
+    public function test_it_rejects_a_sent_at_that_is_not_an_exact_iso_moment(string $sentAt): void
+    {
+        Bus::fake();
+
+        $this->postJson(route('imports.store'), $this->payload(['sent_at' => $sentAt]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['sent_at']);
+
+        Bus::assertNothingDispatched();
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function invalidMoments(): array
+    {
+        return [
+            'a relative word' => ['now'],
+            'a relative phrase' => ['next monday'],
+            'fractional seconds' => ['2026-09-01T10:00:00.500Z'],
+            'no offset' => ['2026-09-01T10:00:00'],
+            'a space instead of T' => ['2026-09-01 10:00:00Z'],
+            'a date only' => ['2026-09-01'],
+        ];
+    }
+
+    public function test_it_rejects_a_request_without_a_supplier(): void
+    {
+        Bus::fake();
+
+        $payload = $this->payload();
+        unset($payload['supplier']);
+
+        $this->postJson(route('imports.store'), $payload)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['supplier']);
+
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_it_rejects_an_offer_that_is_not_an_object(): void
+    {
+        $this->postJson(route('imports.store'), $this->payload(['offers' => ['offer-a-10001']]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['offers.0']);
     }
 
     public function test_it_rejects_an_import_without_offers(): void
@@ -282,11 +358,20 @@ class StoreImportTest extends TestCase
             'max_guests of zero' => ['max_guests', 0],
             'max_guests beyond the cap' => ['max_guests', 65536],
             'negative price' => ['price', -1],
+            'zero price' => ['price', 0],
+            'price as a string' => ['price', '72500'],
+            'max_guests as a string' => ['max_guests', '4'],
+            'available_units as a string' => ['available_units', '2'],
+            'property as a string' => ['property', 'BCN-0001'],
             'fractional price' => ['price', 725.5],
             'two-letter currency' => ['currency', 'EU'],
-            'currency with digits' => ['currency', 'E-1'],
+            'another currency' => ['currency', 'GBP'],
+            'lower-case currency' => ['currency', 'eur'],
             'negative available_units' => ['available_units', -1],
             'expires_at that is not a date' => ['expires_at', 'soon'],
+            'expires_at as a relative word' => ['expires_at', 'tomorrow'],
+            'expires_at with fractional seconds' => ['expires_at', '2026-09-10T23:59:59.999Z'],
+            'expires_at without an offset' => ['expires_at', '2026-09-10T23:59:59'],
         ];
     }
 
@@ -298,6 +383,21 @@ class StoreImportTest extends TestCase
         $this->postJson(route('imports.store'), $payload)
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['offers.0.check_out']);
+    }
+
+    /**
+     * A completed import recorded from the same request as `payload()`.
+     */
+    private function recordedImport(): Import
+    {
+        return Import::factory()
+            ->for(Supplier::query()->where('slug', 'supplier-a')->sole())
+            ->completed(1)
+            ->create([
+                'external_import_id' => 'import-2026-09-01-001',
+                'sent_at' => '2026-09-01 10:00:00',
+                'payload' => $this->payload()['offers'],
+            ]);
     }
 
     /**

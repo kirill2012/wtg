@@ -7,7 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
- * The 202 body of POST /api/imports: just enough to poll the import afterwards.
+ * The body of POST /api/imports: enough to poll the import afterwards.
  *
  * @mixin Import
  */
