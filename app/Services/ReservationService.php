@@ -2,11 +2,12 @@
 
 namespace App\Services;
 
+use App\Exceptions\ClientReferenceTakenException;
+use App\Exceptions\OfferUnavailableException;
 use App\Models\Offer;
 use App\Models\Reservation;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
-use Symfony\Component\HttpFoundation\Response;
 
 class ReservationService
 {
@@ -33,11 +34,11 @@ class ReservationService
             }
 
             if ($locked->expires_at->lessThanOrEqualTo(now())) {
-                abort(Response::HTTP_CONFLICT, 'The offer has expired.');
+                throw OfferUnavailableException::expired();
             }
 
             if ($locked->free_units < 1) {
-                abort(Response::HTTP_CONFLICT, 'The offer is sold out.');
+                throw OfferUnavailableException::soldOut();
             }
 
             // Insert first: MySQL rolls back only the failed statement, so an earlier
@@ -79,7 +80,7 @@ class ReservationService
     private function sameOfferOrConflict(Reservation $reservation, Offer $offer): Reservation
     {
         if (! $reservation->offer()->is($offer)) {
-            abort(Response::HTTP_CONFLICT, 'This client_reference already belongs to a reservation of another offer.');
+            throw new ClientReferenceTakenException;
         }
 
         return $reservation;

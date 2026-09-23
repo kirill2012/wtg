@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Exceptions\ClientReferenceTakenException;
 use App\Models\Offer;
 use App\Services\ReservationService;
 use Illuminate\Database\Events\QueryExecuted;
@@ -12,7 +13,6 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
-use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\TestCase;
 
 /**
@@ -140,8 +140,7 @@ class ReservationConcurrencyTest extends TestCase
         try {
             app(ReservationService::class)->reserve($offer, $this->payload());
             $this->fail('The same reference on another offer was accepted.');
-        } catch (HttpException $e) {
-            $this->assertSame(409, $e->getStatusCode());
+        } catch (ClientReferenceTakenException) {
         }
 
         $this->assertTrue($raced);

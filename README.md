@@ -288,8 +288,10 @@ not mistaken for oversights.
 - `City` keeps its capital letter in the API, as in the task; the column is `city`.
 - A property is not updated after creation: two suppliers describe one object differently,
   and last-writer-wins would make its name flicker between imports.
-- State conflicts are raised as `abort(409)` from the service layer, with no exception
-  hierarchy for two cases.
+- The services know nothing of HTTP: a state conflict is a subclass of
+  `App\Exceptions\ConflictException` (an unavailable offer, a taken `client_reference`, a
+  reused `external_import_id`), which renders itself as `409 {"message": ...}` and is not
+  logged, since it is the client's to resolve.
 
 ## Known limitations
 

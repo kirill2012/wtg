@@ -8,6 +8,7 @@ use App\Models\Reservation;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Exceptions;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -167,6 +168,16 @@ class StoreReservationTest extends TestCase
         $this->postJson(route('offers.reservations.store', $offer), $this->payload())
             ->assertConflict()
             ->assertExactJson(['message' => 'The offer has expired.']);
+    }
+
+    public function test_a_conflict_is_the_client_s_to_resolve_and_is_not_reported(): void
+    {
+        Exceptions::fake();
+        $offer = Offer::factory()->expired()->create();
+
+        $this->postJson(route('offers.reservations.store', $offer), $this->payload())->assertConflict();
+
+        Exceptions::assertNothingReported();
     }
 
     public function test_an_offer_whose_supply_was_lowered_under_its_reservations_is_sold_out_not_negative(): void

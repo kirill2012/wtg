@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\ImportStatus;
+use App\Exceptions\ImportIdReusedException;
 use App\Jobs\ProcessImportJob;
 use App\Models\Import;
 use App\Models\Offer;
@@ -13,7 +14,6 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Symfony\Component\HttpFoundation\Response;
 
 class ImportService
 {
@@ -22,7 +22,7 @@ class ImportService
      * `database` queue on the same connection, so both rows commit together.
      *
      * A resent import returns the existing row and queues nothing; a resend with different
-     * content is a 409.
+     * content is an ImportIdReusedException.
      *
      * @param  array{supplier: string, external_import_id: string, sent_at: string, offers: list<array<string, mixed>>}  $data
      */
@@ -120,7 +120,7 @@ class ImportService
             && $this->withSortedKeys($import->payload) === $this->withSortedKeys($data['offers']);
 
         if (! $hasSameContent) {
-            abort(Response::HTTP_CONFLICT, 'This external_import_id was already used with different content.');
+            throw new ImportIdReusedException;
         }
 
         return $import;
