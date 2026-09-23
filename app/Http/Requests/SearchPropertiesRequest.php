@@ -18,20 +18,19 @@ class SearchPropertiesRequest extends FormRequest
     /**
      * Get the validation rules that apply to the request.
      *
-     * Both dates are required: "the cheapest offer for these dates" is undefined without
-     * them. `guests` and `per_page` default in PropertySearchService.
+     * `guests` and `per_page` default in PropertySearchService.
      *
      * @return array<string, ValidationRule|array<mixed>|string>
      */
     public function rules(): array
     {
         return [
-            // Compared with `=` against DATE columns, as on import.
             'check_in' => ['required', 'date_format:Y-m-d'],
             'check_out' => ['required', 'date_format:Y-m-d', 'after:check_in'],
             'guests' => ['nullable', 'integer', 'min:1'],
             'city' => ['nullable', 'string', 'max:255'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+            'page' => ['nullable', 'integer', 'min:1'],
         ];
     }
 }

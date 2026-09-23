@@ -160,10 +160,18 @@ class SearchPropertiesTest extends TestCase
         $this->search()->assertOk()->assertJsonPath('data.0.best_offer.available_units', 2);
     }
 
-    public function test_a_sold_out_cheaper_offer_yields_to_the_next_live_one_of_the_property(): void
+    /**
+     * The ranking must filter before it ranks: a cheaper offer that is not live cannot hide
+     * the property's live one.
+     *
+     * @param  Closure(OfferFactory): OfferFactory  $state
+     */
+    #[DataProvider('offersThatAreNotLive')]
+    public function test_a_cheaper_offer_that_is_not_live_yields_to_the_next_live_one_of_the_property(Closure $state): void
     {
+        $this->freezeTime();
         $property = Property::factory()->create();
-        $this->liveOffer(['price' => 50000])->soldOut(2)->for($property)->create();
+        $state($this->liveOffer(['price' => 50000]))->for($property)->create();
         $next = $this->liveOffer(['price' => 60000])->for($property)->create();
 
         $this->search()
@@ -291,6 +299,8 @@ class SearchPropertiesTest extends TestCase
             'non-numeric guests' => [['guests' => 'two'], ['guests']],
             'zero per_page' => [['per_page' => 0], ['per_page']],
             'per_page beyond the cap' => [['per_page' => 101], ['per_page']],
+            'zero page' => [['page' => 0], ['page']],
+            'non-numeric page' => [['page' => 'abc'], ['page']],
             'city longer than the column' => [['city' => str_repeat('x', 256)], ['city']],
         ];
     }
