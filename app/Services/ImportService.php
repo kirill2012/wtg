@@ -63,8 +63,15 @@ class ImportService
     }
 
     /**
-     * Apply the payload offer by offer, each in its own transaction, once the job has
-     * claimed the import. A re-run after a failure is safe: `applyOffer()` is idempotent.
+     * Offers applied per transaction: one commit per offer made a 1000-offer re-import take
+     * most of the job's timeout, while a larger batch holds the offers' row locks, which
+     * bookings wait on, for longer.
+     */
+    public const int OFFERS_PER_TRANSACTION = 100;
+
+    /**
+     * Apply the payload in batches, each in its own transaction, once the job has claimed the
+     * import. A re-run after a failure is safe: `applyOffer()` is idempotent.
      *
      * @param  string  $claimant  the queued job's uuid, the same on every attempt
      */
@@ -79,14 +86,23 @@ class ImportService
             return;
         }
 
-        foreach ($import->payload as $offerData) {
+        /** @var array<string, Property> $properties by the code as sent */
+        $properties = [];
+
+        foreach (array_chunk($this->inLockOrder($import->payload), self::OFFERS_PER_TRANSACTION) as $batch) {
             // Outside the transaction, so a property another worker has just committed is visible.
-            $property = $this->findOrCreateProperty($offerData['property']);
+            foreach ($batch as $offerData) {
+                $properties[$offerData['property']['code']] ??= $this->findOrCreateProperty($offerData['property']);
+            }
 
-            // Retried on a deadlock between concurrent inserts.
-            DB::transaction(fn () => $this->applyOffer($import, $property, $offerData), attempts: 3);
+            // Retried on a deadlock between concurrent writers.
+            DB::transaction(function () use ($import, $batch, $properties): void {
+                foreach ($batch as $offerData) {
+                    $this->applyOffer($import, $properties[$offerData['property']['code']], $offerData);
+                }
 
-            $import->increment('processed_offers');
+                Import::query()->whereKey($import->getKey())->increment('processed_offers', count($batch));
+            }, attempts: 3);
         }
 
         $import->update([
@@ -153,6 +169,20 @@ class ImportService
         $import->refresh();
 
         return $import->status === ImportStatus::Processing && $import->claimed_by === $claimant;
+    }
+
+    /**
+     * Sorted by external_id, so two jobs writing the same offers lock them in the same order
+     * instead of deadlocking on each other's batches.
+     *
+     * @param  list<array<string, mixed>>  $offers
+     * @return list<array<string, mixed>>
+     */
+    private function inLockOrder(array $offers): array
+    {
+        usort($offers, fn (array $a, array $b): int => strcmp($a['external_id'], $b['external_id']));
+
+        return $offers;
     }
 
     /**

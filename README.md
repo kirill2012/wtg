@@ -18,7 +18,7 @@ details are in the sections linked.
 | `supplier + external_import_id` is unique | the same `external_import_id` with a different `sent_at` or different offers answers `409` | the supplier reused an id; silently keeping either version would lose data |
 | an offer that exists in another import is updated | it is updated only when the new import's `sent_at` is not older than the one that last wrote it | a stale import processed late must not overwrite newer data ([Import processing](#import-processing)) |
 | the response contains `next`, `prev`, `per_page` | they are in Laravel's paginator envelope: `links.next`, `links.prev`, `meta.per_page` | the standard shape of an API Resource collection, followed by any Laravel client |
-| after an error the import is `failed` | it is `failed`, and the offers applied before the error stay | each offer is its own short transaction, so an import never holds locks the bookings wait on; a retry finishes the rest |
+| after an error the import is `failed` | it is `failed`, and the batches of 100 offers committed before the error stay | a batch is one transaction, short enough that bookings barely wait on its locks; a retry finishes the rest |
 | `completed_at` | also set for a `failed` import, as the moment processing ended | one field for "finished", whatever the outcome |
 | `POST /api/offers/{offer}/reservations` answers `201` | a resend of the same `client_reference` for the same offer answers `200` with the first reservation | the unit was booked by the earlier request |
 
@@ -179,9 +179,12 @@ import write; at the volumes of this task the lookup is cheap, so the narrower i
 ## Import processing
 
 The HTTP request validates, stores and queues; nothing else. `ProcessImportJob` reads the
-offers from `imports.payload` and applies them one by one, each in its own transaction:
+offers from `imports.payload`, sorts them by `external_id` and applies them in batches of
+100 (`ImportService::OFFERS_PER_TRANSACTION`), one transaction per batch. The sort gives two
+jobs writing the same offers one lock order, so they wait on each other instead of
+deadlocking. For each offer:
 
-1. the property is found or created by `code` — outside the offer's transaction, because
+1. the property is found or created by `code` — before the batch's transaction, because
    under `REPEATABLE READ` its snapshot would hide a property another worker has just
    committed;
 2. a plain lookup by `supplier + external_id`; a new offer is inserted, an existing one is
@@ -199,11 +202,12 @@ uuid). A second job for the same import finds it taken or `completed` and does n
 A `ShouldBeUnique` cache lock would sit outside the transaction that queues the job.
 
 On success the import becomes `completed`. The job makes three attempts (backoff 10 s,
-60 s), then marks the import `failed` with the error text. A failure part-way leaves the
-offers already written; a re-run is idempotent and catches up the rest.
+60 s), then marks the import `failed` with the error text. A failure part-way rolls back
+its batch and leaves the batches already committed; a re-run is idempotent and catches up
+the rest.
 
-On the local Docker stack an import of 1000 offers takes about 22 s, dominated by the
-commit per offer. The 1000-offer cap, the job's `$timeout = 60` and the queue's
+On the local Docker stack an import of 1000 new offers takes about 4 s, and a re-import
+that updates them about 2.5 s; with a commit per offer it was 21 s and 34 s. The 1000-offer cap, the job's `$timeout = 60` and the queue's
 `retry_after=90` are related: raise them together.
 
 ## Search query

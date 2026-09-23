@@ -105,7 +105,9 @@ class ImportQueueLifecycleTest extends TestCase
         $import->refresh();
         $this->assertSame(ImportStatus::Failed, $import->status);
         $this->assertNotNull($import->error);
-        $this->assertSame(1, $import->processed_offers);
+        // Both offers share one batch, and the failing one rolled it back.
+        $this->assertSame(0, $import->processed_offers);
+        $this->assertDatabaseCount('offers', 0);
         $this->assertDatabaseCount('jobs', 0);
         $this->assertDatabaseCount('failed_jobs', 1);
     }

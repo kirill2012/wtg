@@ -332,31 +332,47 @@ class ProcessImportJobTest extends TestCase
         $this->assertSame(ImportStatus::Completed, $import->refresh()->status);
     }
 
-    public function test_a_failing_offer_marks_the_import_failed_and_keeps_the_offers_already_written(): void
+    public function test_a_failing_offer_marks_the_import_failed_and_keeps_the_batches_already_written(): void
     {
-        $import = $this->import([
-            $this->offer(),
-            // Bypasses the request validation on purpose: the unsigned column rejects it.
-            $this->offer(['external_id' => 'offer-a-10002', 'price' => -1]),
-        ]);
+        $batch = ImportService::OFFERS_PER_TRANSACTION;
+        $offers = array_map(fn (int $i): array => $this->offer(['external_id' => sprintf('offer-a-%05d', $i)]), range(1, $batch + 1));
+        // Bypasses the request validation on purpose: the unsigned column rejects it. Sorts
+        // last, so it fails the second batch.
+        $offers[] = $this->offer(['external_id' => 'offer-a-99999', 'price' => -1]);
+        $import = $this->import($offers);
 
         try {
             ProcessImportJob::dispatchSync($import);
-            $this->fail('The job should have failed on the second offer.');
+            $this->fail('The job should have failed on the last offer.');
         } catch (QueryException) {
         }
 
         $import->refresh();
         $this->assertSame(ImportStatus::Failed, $import->status);
-        $this->assertSame(1, $import->processed_offers);
+        $this->assertSame($batch, $import->processed_offers);
+        $this->assertDatabaseCount('offers', $batch);
+        $this->assertDatabaseMissing('offers', ['external_id' => sprintf('offer-a-%05d', $batch + 1)]);
         // The field is public: the driver's message, and nothing of the statement, the
         // bindings or the connection behind it.
         $this->assertStringContainsString('Out of range', (string) $import->error);
         $this->assertStringNotContainsString('Connection:', (string) $import->error);
         $this->assertStringNotContainsString('insert into', (string) $import->error);
         $this->assertNotNull($import->completed_at);
-        $this->assertDatabaseHas('offers', ['external_id' => 'offer-a-10001']);
-        $this->assertDatabaseMissing('offers', ['external_id' => 'offer-a-10002']);
+    }
+
+    public function test_offers_are_applied_in_external_id_order_whatever_the_payload_order(): void
+    {
+        $import = $this->import([
+            $this->offer(['external_id' => 'offer-a-10002']),
+            $this->offer(['external_id' => 'offer-a-10001']),
+        ]);
+
+        ProcessImportJob::dispatchSync($import);
+
+        $this->assertSame(
+            ['offer-a-10001', 'offer-a-10002'],
+            Offer::query()->orderBy('id')->pluck('external_id')->all(),
+        );
     }
 
     public function test_a_new_attempt_starts_the_counter_and_the_error_from_scratch(): void
