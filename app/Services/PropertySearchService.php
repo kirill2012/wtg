@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Offer;
+use App\Models\Property;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\Query\JoinClause;
@@ -14,12 +15,13 @@ class PropertySearchService
     private const int DEFAULT_PER_PAGE = 15;
 
     /**
-     * The cheapest live offer of every matching property, cheapest first, paginated in SQL.
+     * Every property with a live offer, cheapest first, its cheapest live offer loaded as
+     * `bestOffer`. Ranked and paginated in SQL over offers, then handed out as properties.
      *
      * Query-string values stay strings after the `integer` rule, hence the casts.
      *
      * @param  array{check_in: string, check_out: string, guests?: int|string|null, city?: string|null, per_page?: int|string|null}  $filters
-     * @return LengthAwarePaginator<int, Offer>
+     * @return LengthAwarePaginator<int, Property>
      */
     public function search(array $filters): LengthAwarePaginator
     {
@@ -32,7 +34,8 @@ class PropertySearchService
             ->orderBy('offers.price')
             ->orderBy('offers.property_id')
             ->with(['property', 'supplier'])
-            ->paginate((int) ($filters['per_page'] ?? self::DEFAULT_PER_PAGE));
+            ->paginate((int) ($filters['per_page'] ?? self::DEFAULT_PER_PAGE))
+            ->through(fn (Offer $offer): Property => $offer->property->setRelation('bestOffer', $offer));
     }
 
     /**
