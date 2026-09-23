@@ -34,13 +34,10 @@ make -C docker artisan c="db:seed"    # the two suppliers: supplier-a, supplier-
 The root `.env` is the application's; `docker/.env` feeds the `${...}` substitutions in
 `docker-compose.yml`. Keep `DB_DATABASE`, `DB_USERNAME` and `DB_PASSWORD` identical in both.
 
-`--wait` returns only once `app` is healthy, which happens after the migrations, so the seed
-cannot outrun them.
-
-On first boot the `app` container generates `APP_KEY`, waits for MySQL and runs
-the migrations; the `queue` container starts a worker. nginx answers on
-<http://localhost> (`APP_URL` is `http://wtg.loc` — add it to `/etc/hosts` to use that
-name); `/up` is the health check.
+On first boot the `app` container generates `APP_KEY`, waits for MySQL and runs the
+migrations, and only then reports healthy, so `--wait` keeps the seed from outrunning them;
+the `queue` container starts a worker. nginx answers on <http://localhost> (`APP_URL` is
+`http://wtg.loc` — add it to `/etc/hosts` to use that name); `/up` is the health check.
 
 ## Commands
 
@@ -80,12 +77,11 @@ php artisan test
 ## API
 
 Requests and responses are JSON. Validation errors come back as `422` with Laravel's
-standard `{"message": ..., "errors": {...}}`, a missing record or route as `404
-{"message": "Not Found."}`, a state conflict (a sold-out or expired offer, a reused import or booking reference) as
-`409 {"message": "..."}`. Moments are
-serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates stay
-`2026-10-10` in both directions. Prices are integers in minor units:
-`72500` is 725.00.
+standard `{"message": ..., "errors": {...}}`, a missing record or route as
+`404 {"message": "Not Found."}`, a state conflict (a sold-out or expired offer, a reused
+import or booking reference) as `409 {"message": "..."}`. Moments are serialised as
+`2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates stay `2026-10-10` in both
+directions. Prices are integers in minor units: `72500` is 725.00.
 
 `wtg.postman_collection.json` in the repository root walks the whole of it — import,
 status, search, booking — and asserts every response against the contract described here.
@@ -103,8 +99,8 @@ the structure and the supplier, stores the import together with its payload, que
 `Location` header pointing at the status endpoint.
 
 `supplier + external_import_id` identifies an import. Resending it with the same content
-answers `202` too, with the existing row and its *current* status (`completed` a minute later,
-not `pending`) and queues nothing. Resending it with a different `sent_at` or different
+answers `202` too, with the existing row and its *current* status (`completed` a minute
+later, not `pending`), and queues nothing. Resending it with a different `sent_at` or different
 offers answers `409`: the supplier has reused an id, and neither version is silently
 dropped.
 
@@ -145,35 +141,20 @@ reference already belongs to a reservation of another offer.
 
 ## Data model
 
-Imports and offers belong to a supplier; an offer belongs to a property and to the import
-that last wrote it; a reservation belongs to an offer.
-
-- `imports` — `supplier_id` + `external_import_id` (unique together), `sent_at`, `status`,
-  `payload` (JSON, the offers as validated), `total_offers`, `processed_offers`, `error`,
-  `completed_at`, `claimed_by` (the uuid of the job processing it).
-- `properties` — `code` (unique), `name`, `city` (indexed).
-- `offers` — `supplier_id` + `external_id` (unique together), `property_id`, `import_id`
-  and `sent_at` (which import last wrote the row and when the supplier produced it),
-  `check_in`, `check_out`, `max_guests`, `price`, `currency`, `available_units`,
-  `reserved_units`, `expires_at`.
-- `reservations` — `offer_id`, `client_reference` (unique), the customer fields, and the
-  snapshot of what was booked: `property_id`, `check_in`, `check_out`, `price`, `currency`.
+A supplier has imports and offers; an offer belongs to a property and to the import that
+last wrote it; a reservation belongs to an offer. Unique keys: `suppliers.slug`,
+`properties.code`, `imports (supplier_id, external_import_id)`,
+`offers (supplier_id, external_id)`, `reservations.client_reference`.
 
 Availability is split in two columns: `available_units` is written by imports only,
-`reserved_units` by bookings (an import only recounts it when it moves the offer, see
-below). The API publishes their difference, clamped at zero, under the key
+`reserved_units` by bookings. The API publishes their difference, clamped at zero, as
 `available_units`.
 
 One composite index serves the search, `offers (check_in, check_out, property_id, price)`:
-the dates alone, or the dates plus `property_id` when a `city` filter makes the optimizer
-start from `properties (city)`. A mirrored `(property_id, ...)` index was dropped:
-`EXPLAIN` never chose it.
-
-The index is not covering, on purpose. The dates narrow the scan, but `max_guests`,
-`expires_at`, `available_units` and `reserved_units` are read from the row, and the ranking
-subquery is materialised for the count and again for the page. Adding those four columns
-would make the subquery index-only at the cost of a wider index to maintain on every
-import write; at the volumes of this task the lookup is cheap, so the narrower index wins.
+by the dates alone, or by the dates plus `property_id` when a `city` filter makes the
+optimizer start from `properties (city)`. It is not covering on purpose: `max_guests`,
+`expires_at` and the unit columns are read from the row, which is cheap at these volumes,
+while a wider index would cost every import write.
 
 ## Import processing
 
@@ -206,8 +187,9 @@ its batch and leaves the batches already committed; a re-run is idempotent and c
 the rest.
 
 On the local Docker stack an import of 1000 new offers takes about 4 s, and a re-import
-that updates them about 2.5 s; with a commit per offer it was 21 s and 34 s. The 1000-offer cap, the job's `$timeout = 60` and the queue's
-`retry_after=90` are related: raise them together.
+that updates them about 2.5 s; with a commit per offer it was 21 s and 34 s. The
+1000-offer cap, the job's `$timeout = 60` and the queue's `retry_after=90` are related:
+raise them together.
 
 ## Search query
 
@@ -247,50 +229,28 @@ caught conflict takes no unit.
 
 ## Assumptions
 
-Decisions the task leaves open, and shortcuts taken on purpose, written down so they are
-not mistaken for oversights.
+Decisions the task leaves open, written down so they are not mistaken for oversights.
 
-- The task sets PHP 8.2+ as the lower bound, so the project targets the latest release,
-  PHP 8.5: `composer.json` requires `^8.5`, and the Docker image runs it. Without Docker
-  the host needs PHP 8.5 as well.
-- Every supplier prices in one currency, EUR, as in the task's example. Search picks the
-  cheapest offer and sorts the page by raw minor units, which is only meaningful within
-  one currency, and conversion is out of scope. The import enforces it: an offer in any
-  other currency (or a lower-case `eur`) is a `422`, not a silently mis-sorted result.
-- Search matches `check_in` and `check_out` exactly, as the task states; no overlap logic.
-- `available_units` is the quota the supplier gives this application for the offer, not
-  its live stock: bookings made here are subtracted from it (`reserved_units`), and a
-  supplier that already counted them in would have them subtracted twice.
-- A supplier may publish `available_units` below what is already reserved. The column is
-  stored as sent, existing reservations stay, the published remainder is clamped at zero
-  and the offer leaves the search.
-- Resending a `client_reference` with different customer data returns the original
-  reservation; the reference identifies the request, not the customer fields.
-- An import resent with the same id compares by content: the same `sent_at` moment (in
-  any offset) and the same offers (in any key order) is a resend, anything else a `409`.
-- There is no authentication: the task does not ask for it. In a real system the supplier
-  would come from its API token rather than from the request body, and the booking
-  endpoint would sit behind the client's own auth.
-- A reservation snapshots the property, the stay, the price and the currency: a later
-  import may change the offer, and the booking must not follow it.
-- External ids, property codes, cities and client references are compared without regard
-  to case or diacritics (`utf8mb4_unicode_ci`): `BCN-0001` and `bcn-0001` are one
-  property, `Barcelona` and `barcelona` match. `distinct:ignore_case` rejects duplicates
-  that differ only in case within one payload; a pair differing only in diacritics
-  collapses in the job. Leading and trailing whitespace is trimmed.
-- `sent_at` and `expires_at` must be ISO 8601 with whole seconds and an explicit offset
-  (`2026-09-01T10:00:00Z` or `2026-09-01T12:00:00+02:00`) and are converted to UTC on
-  write. Words like `now` would change on every resend and break resend detection, and
-  the columns keep no fractions, so a fractional resend would never compare equal.
-- `imports.payload` stores the validated request offers, so an import can be re-run
-  without the supplier.
+- PHP 8.5, the latest release; the task sets 8.2+ as the lower bound.
+- One currency, EUR, as in the task's example: the search compares raw minor units, with
+  no conversion. An offer in another currency is a `422`, not a mis-sorted result.
+- The search matches `check_in` and `check_out` exactly, as the task states; no overlaps.
+- `available_units` is the quota the supplier gives this application, not its live stock:
+  bookings made here are subtracted from it. A supplier may publish fewer units than are
+  already reserved; the reservations stay, and the offer leaves the search.
+- A reservation snapshots the property, the stay, the price and the currency, so a later
+  import that changes the offer does not change the booking.
+- A `client_reference` identifies the request, not the customer: a resend with other
+  customer data returns the original reservation.
+- Codes, ids, cities and references are trimmed and compared without regard to case or
+  diacritics (`utf8mb4_unicode_ci`): `BCN-0001` and `bcn-0001` are one property.
+- `sent_at` and `expires_at` must be ISO 8601 with whole seconds and an explicit offset, and
+  are stored in UTC: words like `now` or fractions would make an identical resend differ.
+- A property is not updated after creation: two suppliers describe it differently, and
+  last-writer-wins would make its name flicker.
 - `City` keeps its capital letter in the API, as in the task; the column is `city`.
-- A property is not updated after creation: two suppliers describe one object differently,
-  and last-writer-wins would make its name flicker between imports.
-- The services know nothing of HTTP: a state conflict is a subclass of
-  `App\Exceptions\ConflictException` (an unavailable offer, a taken `client_reference`, a
-  reused `external_import_id`), which renders itself as `409 {"message": ...}` and is not
-  logged, since it is the client's to resolve.
+- No authentication, as the task does not ask for it; in a real system the supplier would
+  come from its API token rather than from the request body.
 
 ## Known limitations
 
