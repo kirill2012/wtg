@@ -187,7 +187,8 @@ offers from `imports.payload` and applies them one by one, each in its own trans
 2. a plain lookup by `supplier + external_id`; a new offer is inserted, an existing one is
    re-read with `SELECT ... FOR UPDATE`;
 3. if the row was last written by an import with a later `sent_at`, it is left alone;
-   equal timestamps update. `reserved_units` is kept, unless the update moves the offer
+   on equal timestamps the import recorded later (the higher id) wins, whatever order the
+   jobs run in. `reserved_units` is kept, unless the update moves the offer
    to another property or other dates: then it is recounted from the reservations booked
    for the new stay (usually zero), so units booked for October do not sell out November.
 

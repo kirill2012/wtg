@@ -132,7 +132,24 @@ class ProcessImportJobTest extends TestCase
         $this->assertSame(1, $stale->processed_offers);
     }
 
-    public function test_an_import_with_the_same_sent_at_still_updates_the_offer(): void
+    public function test_an_import_with_the_same_sent_at_recorded_earlier_does_not_overwrite_a_later_one(): void
+    {
+        $earlier = $this->import([$this->offer(['price' => 72500])], ['sent_at' => '2026-09-01 10:00:00']);
+        $later = Import::factory()->for($this->supplier)->create(['sent_at' => '2026-09-01 10:00:00']);
+        $offer = Offer::factory()->for($this->supplier)->for($later)->create([
+            'external_id' => 'offer-a-10001',
+            'price' => 80000,
+            'sent_at' => '2026-09-01 10:00:00',
+        ]);
+
+        ProcessImportJob::dispatchSync($earlier);
+
+        $offer->refresh();
+        $this->assertSame(80000, $offer->price);
+        $this->assertTrue($offer->import->is($later));
+    }
+
+    public function test_an_import_with_the_same_sent_at_recorded_later_updates_the_offer(): void
     {
         $offer = Offer::factory()->for($this->supplier)->create([
             'external_id' => 'offer-a-10001',

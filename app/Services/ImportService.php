@@ -206,8 +206,8 @@ class ImportService
         // Locked, so a staler import cannot commit over a newer one.
         $offer = Offer::query()->where($keys)->lockForUpdate()->firstOrFail();
 
-        // The newer sent_at wins; a skipped offer still counts as processed.
-        if ($offer->sent_at->greaterThan($import->sent_at)) {
+        // A skipped offer still counts as processed.
+        if ($this->isWrittenByNewerImport($offer, $import)) {
             return;
         }
 
@@ -225,5 +225,18 @@ class ImportService
         }
 
         $offer->save();
+    }
+
+    /**
+     * The newer sent_at wins. On a tie the import recorded later wins, so the outcome does not
+     * depend on which job runs last; the same import re-running is not newer than itself.
+     */
+    private function isWrittenByNewerImport(Offer $offer, Import $import): bool
+    {
+        if (! $offer->sent_at->equalTo($import->sent_at)) {
+            return $offer->sent_at->greaterThan($import->sent_at);
+        }
+
+        return $offer->import_id > $import->id;
     }
 }
