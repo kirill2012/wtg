@@ -7,6 +7,21 @@ Repository: <https://github.com/kirill2012/wtg>
 
 PHP 8.5 · Laravel 12 · MySQL 8.4 (data, queue and cache) · nginx · Docker. API-only.
 
+## Deviations from the task
+
+Places where the API answers differently from the letter of the task, on purpose. The
+details are in the sections linked.
+
+| The task says | The API does | Why |
+|---|---|---|
+| `POST /api/imports` answers `202` | a resend of an import already recorded answers `200` with the existing row and its current status, and queues nothing | the import was accepted by the earlier request; a second `202` would claim a new one ([API](#post-apiimports--accept-an-import)) |
+| `supplier + external_import_id` is unique | the same `external_import_id` with a different `sent_at` or different offers answers `409` | the supplier reused an id; silently keeping either version would lose data |
+| an offer that exists in another import is updated | it is updated only when the new import's `sent_at` is not older than the one that last wrote it | a stale import processed late must not overwrite newer data ([Import processing](#import-processing)) |
+| the response contains `next`, `prev`, `per_page` | they are in Laravel's paginator envelope: `links.next`, `links.prev`, `meta.per_page` | the standard shape of an API Resource collection, followed by any Laravel client |
+| after an error the import is `failed` | it is `failed`, and the offers applied before the error stay | each offer is its own short transaction, so an import never holds locks the bookings wait on; a retry finishes the rest |
+| `completed_at` | also set for a `failed` import, as the moment processing ended | one field for "finished", whatever the outcome |
+| `POST /api/offers/{offer}/reservations` answers `201` | a resend of the same `client_reference` for the same offer answers `200` with the first reservation | the unit was booked by the earlier request |
+
 ## Installation
 
 ```bash
@@ -67,7 +82,8 @@ php artisan test
 
 Requests and responses are JSON. Validation errors come back as `422` with Laravel's
 standard `{"message": ..., "errors": {...}}`, a missing record or route as `404
-{"message": "Not Found."}`, a state conflict as `409 {"message": "..."}`. Moments are
+{"message": "Not Found."}`, a state conflict (a sold-out or expired offer, a reused import or booking reference) as
+`409 {"message": "..."}`. Moments are
 serialised as `2026-09-01T10:00:00Z` (UTC, no microseconds); calendar dates stay
 `2026-10-10` in both directions. Prices are integers in minor units:
 `72500` is 725.00.
@@ -87,9 +103,11 @@ the structure and the supplier, stores the import together with its payload, que
 `ProcessImportJob` and answers `202` with `{"data": {"id": 15, "status": "pending"}}` and a
 `Location` header pointing at the status endpoint.
 
-`supplier + external_import_id` identifies an import. Resending it returns the existing row
-with its *current* status (`completed` a minute later, not `pending`) and queues nothing,
-even when the payload differs.
+`supplier + external_import_id` identifies an import. Resending it with the same content
+answers `200` with the existing row and its *current* status (`completed` a minute later,
+not `pending`) and queues nothing. Resending it with a different `sent_at` or different
+offers answers `409`: the supplier has reused an id, and neither version is silently
+dropped.
 
 The import row and its job are written by **one transaction**: `ProcessImportJob` is
 pinned to the `database` queue on the application's own connection, whatever
@@ -143,13 +161,20 @@ that last wrote it; a reservation belongs to an offer.
   snapshot of what was booked: `property_id`, `check_in`, `check_out`, `price`, `currency`.
 
 Availability is split in two columns: `available_units` is written by imports only,
-`reserved_units` by bookings only. The API publishes their difference, clamped at zero,
-under the key `available_units`.
+`reserved_units` by bookings (an import only recounts it when it moves the offer, see
+below). The API publishes their difference, clamped at zero, under the key
+`available_units`.
 
 One composite index serves the search, `offers (check_in, check_out, property_id, price)`:
 the dates alone, or the dates plus `property_id` when a `city` filter makes the optimizer
 start from `properties (city)`. A mirrored `(property_id, ...)` index was dropped:
 `EXPLAIN` never chose it.
+
+The index is not covering, on purpose. The dates narrow the scan, but `max_guests`,
+`expires_at`, `available_units` and `reserved_units` are read from the row, and the ranking
+subquery is materialised for the count and again for the page. Adding those four columns
+would make the subquery index-only at the cost of a wider index to maintain on every
+import write; at the volumes of this task the lookup is cheap, so the narrower index wins.
 
 ## Import processing
 
@@ -162,7 +187,9 @@ offers from `imports.payload` and applies them one by one, each in its own trans
 2. a plain lookup by `supplier + external_id`; a new offer is inserted, an existing one is
    re-read with `SELECT ... FOR UPDATE`;
 3. if the row was last written by an import with a later `sent_at`, it is left alone;
-   equal timestamps update. `reserved_units` is never touched.
+   equal timestamps update. `reserved_units` is kept, unless the update moves the offer
+   to another property or other dates: then it is recounted from the reservations booked
+   for the new stay (usually zero), so units booked for October do not sell out November.
 
 Before the first offer the job **claims** the import with one conditional `UPDATE`
 that sets `status = 'processing'` and `claimed_by = <job uuid>`: allowed from `pending` or
@@ -219,16 +246,27 @@ caught conflict takes no unit.
 Decisions the task leaves open, and shortcuts taken on purpose, written down so they are
 not mistaken for oversights.
 
-- Prices are compared as raw minor units, so the cheapest offer is correct within one
-  currency; currency conversion is out of scope.
+- The task sets PHP 8.2+ as the lower bound, so the project targets the latest release,
+  PHP 8.5: `composer.json` requires `^8.5`, and the Docker image runs it. Without Docker
+  the host needs PHP 8.5 as well.
+- Every supplier prices in one currency, EUR, as in the task's example. Search picks the
+  cheapest offer and sorts the page by raw minor units, which is only meaningful within
+  one currency, and conversion is out of scope. The import enforces it: an offer in any
+  other currency (or a lower-case `eur`) is a `422`, not a silently mis-sorted result.
 - Search matches `check_in` and `check_out` exactly, as the task states; no overlap logic.
+- `available_units` is the quota the supplier gives this application for the offer, not
+  its live stock: bookings made here are subtracted from it (`reserved_units`), and a
+  supplier that already counted them in would have them subtracted twice.
 - A supplier may publish `available_units` below what is already reserved. The column is
   stored as sent, existing reservations stay, the published remainder is clamped at zero
   and the offer leaves the search.
 - Resending a `client_reference` with different customer data returns the original
   reservation; the reference identifies the request, not the customer fields.
-- A resend answers `200`, not the `201` the task names: the reservation it returns was
-  created by the earlier request, and claiming otherwise would misreport what happened.
+- An import resent with the same id compares by content: the same `sent_at` moment (in
+  any offset) and the same offers (in any key order) is a resend, anything else a `409`.
+- There is no authentication: the task does not ask for it. In a real system the supplier
+  would come from its API token rather than from the request body, and the booking
+  endpoint would sit behind the client's own auth.
 - A reservation snapshots the property, the stay, the price and the currency: a later
   import may change the offer, and the booking must not follow it.
 - External ids, property codes, cities and client references are compared without regard
@@ -236,8 +274,10 @@ not mistaken for oversights.
   property, `Barcelona` and `barcelona` match. `distinct:ignore_case` rejects duplicates
   that differ only in case within one payload; a pair differing only in diacritics
   collapses in the job. Leading and trailing whitespace is trimmed.
-- `sent_at` and `expires_at` are converted to UTC on write; a value without an offset is
-  read as UTC (`config/app.php` pins the application timezone to UTC).
+- `sent_at` and `expires_at` must be ISO 8601 with whole seconds and an explicit offset
+  (`2026-09-01T10:00:00Z` or `2026-09-01T12:00:00+02:00`) and are converted to UTC on
+  write. Words like `now` would change on every resend and break resend detection, and
+  the columns keep no fractions, so a fractional resend would never compare equal.
 - `imports.payload` stores the validated request offers, so an import can be re-run
   without the supplier.
 - `City` keeps its capital letter in the API, as in the task; the column is `city`.
