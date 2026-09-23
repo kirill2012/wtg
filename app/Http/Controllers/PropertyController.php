@@ -11,7 +11,7 @@ class PropertyController extends Controller
 {
     public function index(SearchPropertiesRequest $request, PropertySearchService $propertySearch): AnonymousResourceCollection
     {
-        // Page links must carry the search itself, or following `next` would end in a 422.
+        // Page links keep the search parameters.
         return PropertySearchResultResource::collection(
             $propertySearch->search($request->validated())->withQueryString(),
         );

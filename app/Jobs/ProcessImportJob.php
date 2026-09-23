@@ -13,9 +13,8 @@ use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Pinned to the `database` connection so ImportService::accept() can write the import and
- * this job in one transaction. Duplicate jobs are kept apart by the import's status (see
- * `ImportService::claim()`), not by `ShouldBeUnique`, whose cache lock sits outside it.
+ * Pinned to the `database` connection, so ImportService::accept() writes the import and
+ * this job in one transaction. Duplicate jobs are kept apart by ImportService::claim().
  */
 class ProcessImportJob implements ShouldQueue
 {
@@ -24,8 +23,7 @@ class ProcessImportJob implements ShouldQueue
     public int $tries = 3;
 
     /**
-     * Must stay below the connection's `retry_after`, or a slow attempt would be handed to
-     * a second worker.
+     * Below the queue's `retry_after`, or a slow attempt would reach a second worker.
      */
     public int $timeout = 60;
 
@@ -50,19 +48,13 @@ class ProcessImportJob implements ShouldQueue
      */
     public function handle(ImportService $importService): void
     {
-        // No job instance when run directly, outside a queue.
+        // No job instance when run outside a queue.
         $importService->process($this->import, $this->job?->uuid() ?? (string) Str::uuid());
     }
 
     /**
-     * Runs once the attempts are exhausted, so an import never hangs in `processing`.
-     *
-     * Only an unclaimed import, or one this job holds and has not completed, is marked
-     * failed: a duplicate that gives up must not fail another job's work.
-     *
-     * Accepted edge: a duplicate giving up on a `pending` import before the owner starts
-     * makes a client see `failed`, then `completed`. Duplicates only come from a manual
-     * re-dispatch.
+     * Runs once the attempts are exhausted. Marks the import failed only while it is
+     * pending or held by this job, so a duplicate job cannot fail another's work.
      */
     public function failed(?Throwable $exception): void
     {
@@ -89,8 +81,7 @@ class ProcessImportJob implements ShouldQueue
     }
 
     /**
-     * `error` is public: cut the SQL, bindings and connection details a QueryException
-     * appends. The full exception is logged by `failed()`.
+     * `error` is public: drop the SQL and connection details a QueryException appends.
      */
     private function describe(?Throwable $exception): string
     {

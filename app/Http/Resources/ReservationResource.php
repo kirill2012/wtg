@@ -7,10 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
- * The body of POST /api/offers/{offer}/reservations: the reservation, flat.
- *
- * Returns the reservation's snapshot, not the offer's current state. Expects the
- * `property` relation to be loaded.
+ * The reservation as booked, not the offer's current state. Expects `property` loaded.
  *
  * @mixin Reservation
  */
@@ -30,7 +27,7 @@ class ReservationResource extends JsonResource
             'customer_name' => $this->customer_name,
             'customer_email' => $this->customer_email,
             'property_code' => $this->property->code,
-            // Dates, not moments: a bare Carbon would serialise as `2026-10-10T00:00:00Z`.
+            // Dates, not moments.
             'check_in' => $this->check_in->toDateString(),
             'check_out' => $this->check_out->toDateString(),
             'price' => $this->price,

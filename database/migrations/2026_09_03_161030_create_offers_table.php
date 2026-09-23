@@ -30,9 +30,7 @@ return new class extends Migration
 
             $table->unique(['supplier_id', 'external_id']);
 
-            // Serves both search paths: the dates alone, or the dates plus property_id when the
-            // city filter narrows properties first. EXPLAIN never chose a mirrored
-            // (property_id, check_in, check_out, price) index, so it is not kept.
+            // Serves the search with and without the city filter.
             $table->index(['check_in', 'check_out', 'property_id', 'price']);
         });
     }

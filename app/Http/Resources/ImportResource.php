@@ -7,10 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
- * The current state of an asynchronous import, as polled via GET /api/imports/{import}.
- *
- * Fields are listed explicitly: the moment serializer in AppServiceProvider skips the
- * strings `parent::toArray()` produces. Expects the `supplier` relation to be loaded.
+ * The state of an import, as polled via GET /api/imports/{import}. Expects `supplier` loaded.
  *
  * @mixin Import
  */

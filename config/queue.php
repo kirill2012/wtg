@@ -37,14 +37,12 @@ return [
 
         'database' => [
             'driver' => 'database',
-            // Must stay the application's own connection (unset, or DB_CONNECTION): the job
-            // row is written by the transaction that writes the import only on that one.
+            // The application's own connection, with `after_commit` off: ImportService::accept()
+            // writes the import and its job in one transaction.
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
             'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
-            // Must stay off: ImportService::accept() relies on the job row being inserted
-            // inside the transaction that inserts the import.
             'after_commit' => false,
         ],
 

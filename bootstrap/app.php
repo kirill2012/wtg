@@ -22,11 +22,7 @@ return Application::configure(basePath: dirname(__DIR__))
         /** The default 404 body would name the model class. */
         $exceptions->render(fn (NotFoundHttpException $e) => response()->json(['message' => 'Not Found.'], 404));
 
-        /**
-         * A 409 is a normal answer, so it keeps the `{"message": ...}` shape even with
-         * APP_DEBUG on. Registered after the 404 above, which is an HttpException too;
-         * other statuses fall through and stay debuggable.
-         */
+        /** A 409 keeps the `{"message": ...}` shape even with APP_DEBUG on. */
         $exceptions->render(fn (HttpException $e) => $e->getStatusCode() === 409
             ? response()->json(['message' => $e->getMessage()], 409)
             : null);

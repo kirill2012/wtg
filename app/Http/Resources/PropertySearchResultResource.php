@@ -7,11 +7,8 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
- * One row of GET /api/properties: a property together with its best offer.
- *
- * Wraps an Offer, not a Property: the search keeps one offer per property, and its
- * `property` relation supplies the property fields. Expects `property` and `supplier` to be
- * loaded. `City` keeps the task contract's capital letter.
+ * One row of GET /api/properties. Wraps the property's best offer, not the property.
+ * Expects `property` and `supplier` loaded.
  *
  * @mixin Offer
  */
@@ -33,7 +30,7 @@ class PropertySearchResultResource extends JsonResource
                 'supplier' => $this->supplier->slug,
                 'price' => $this->price,
                 'currency' => $this->currency,
-                // What is still bookable, not the supplier's raw column.
+                // Available minus reserved.
                 'available_units' => $this->free_units,
                 'expires_at' => $this->expires_at,
             ],
