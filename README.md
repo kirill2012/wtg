@@ -180,7 +180,7 @@ import write; at the volumes of this task the lookup is cheap, so the narrower i
 
 The HTTP request validates, stores and queues; nothing else. `ProcessImportJob` reads the
 offers from `imports.payload`, sorts them by `external_id` and applies them in batches of
-100 (`ImportService::OFFERS_PER_TRANSACTION`), one transaction per batch. The sort gives two
+100 (`ImportProcessor::OFFERS_PER_TRANSACTION`), one transaction per batch. The sort gives two
 jobs writing the same offers one lock order, so they wait on each other instead of
 deadlocking. For each offer:
 

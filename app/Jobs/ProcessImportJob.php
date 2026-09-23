@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Enums\ImportStatus;
 use App\Models\Import;
-use App\Services\ImportService;
+use App\Services\ImportProcessor;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Foundation\Queue\Queueable;
@@ -14,7 +14,7 @@ use Throwable;
 
 /**
  * Pinned to the `database` connection, so ImportService::accept() writes the import and
- * this job in one transaction. Duplicate jobs are kept apart by ImportService::claim().
+ * this job in one transaction. Duplicate jobs are kept apart by ImportProcessor::claim().
  */
 class ProcessImportJob implements ShouldQueue
 {
@@ -46,10 +46,10 @@ class ProcessImportJob implements ShouldQueue
     /**
      * Execute the job.
      */
-    public function handle(ImportService $importService): void
+    public function handle(ImportProcessor $importProcessor): void
     {
         // No job instance when run outside a queue.
-        $importService->process($this->import, $this->job?->uuid() ?? (string) Str::uuid());
+        $importProcessor->process($this->import, $this->job?->uuid() ?? (string) Str::uuid());
     }
 
     /**

@@ -9,7 +9,7 @@ use App\Models\Offer;
 use App\Models\Property;
 use App\Models\Reservation;
 use App\Models\Supplier;
-use App\Services\ImportService;
+use App\Services\ImportProcessor;
 use Database\Seeders\SupplierSeeder;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
@@ -334,7 +334,7 @@ class ProcessImportJobTest extends TestCase
 
     public function test_a_failing_offer_marks_the_import_failed_and_keeps_the_batches_already_written(): void
     {
-        $batch = ImportService::OFFERS_PER_TRANSACTION;
+        $batch = ImportProcessor::OFFERS_PER_TRANSACTION;
         $offers = array_map(fn (int $i): array => $this->offer(['external_id' => sprintf('offer-a-%05d', $i)]), range(1, $batch + 1));
         // Bypasses the request validation on purpose: the unsigned column rejects it. Sorts
         // last, so it fails the second batch.
@@ -435,7 +435,7 @@ class ProcessImportJobTest extends TestCase
         $this->freezeSecond();
         $import = $this->import([$this->offer()], ['status' => ImportStatus::Processing, 'claimed_by' => self::OWNER]);
 
-        app(ImportService::class)->process($import, self::OWNER);
+        app(ImportProcessor::class)->process($import, self::OWNER);
 
         $import->refresh();
         $this->assertSame(ImportStatus::Completed, $import->status);
